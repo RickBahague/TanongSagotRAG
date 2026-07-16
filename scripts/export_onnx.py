@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Fetch the ONNX MiniLM encoder for desktop builds.
+"""Fetch the ONNX query encoder for desktop builds.
 
-The sentence-transformers/all-MiniLM-L6-v2 repo ships a pre-exported
-onnx/model.onnx, so no torch/optimum export is needed — just download it:
+The config.EMBED_MODEL repo on Hugging Face (default BAAI/bge-small-en-v1.5)
+ships a pre-exported onnx/model.onnx, so no torch/optimum export is needed —
+just download it:
 
   .venv/bin/python scripts/export_onnx.py
 
-Produces models/minilm-onnx/{model.onnx,tokenizer.json}. Once present,
-rag.OnnxEncoder is used automatically for query encoding. If
-sentence-transformers is installed, output is sanity-checked against it.
+Produces models/encoder-onnx/{model.onnx,tokenizer.json} (the directory
+config.ONNX_ENCODER_DIR points at). Once present, rag.OnnxEncoder is used
+automatically for query encoding. If sentence-transformers is installed,
+output is sanity-checked against it.
 """
 import sys
 import urllib.request
