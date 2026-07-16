@@ -1,0 +1,16 @@
+# mutable/user data — never committed
+.venv/
+devdata/
+writings/
+models/
+*.gguf
+
+# build output
+dist/
+build/
+
+# cruft
+__pycache__/
+*.pyc
+.DS_Store
+nohup.out

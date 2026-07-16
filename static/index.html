@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tanong at Sagot — ask your documents</title>
+<style>
+  :root { --bg:#f7f8fa; --ink:#22272e; --accent:#1b5e8c; --accent2:#2e7fb4;
+          --card:#fff; --muted:#7a828c; --line:#e2e6ea; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.55 Georgia, serif; background:var(--bg); color:var(--ink); }
+
+  header { padding:14px 24px 12px; border-bottom:1px solid var(--line);
+           background:linear-gradient(#fdfdfe, var(--bg)); }
+  .head-row { max-width:860px; margin:0 auto; display:flex; align-items:center;
+              gap:12px; flex-wrap:wrap; }
+  h1 { font-size:22px; margin:0; color:var(--accent); letter-spacing:.5px; }
+  #colSelect { font:14px system-ui, sans-serif; padding:6px 10px; border:1px solid var(--line);
+               border-radius:6px; background:var(--card); max-width:230px; }
+  #collstats { font:12px system-ui, sans-serif; color:var(--muted); cursor:pointer;
+               border-bottom:1px dotted var(--muted); }
+  .mode { margin-left:auto; font-family:system-ui, sans-serif; font-size:13px;
+          display:flex; align-items:center; }
+  .mode button { border:1px solid var(--line); background:var(--card); padding:6px 13px; cursor:pointer; }
+  .mode button.mseg:first-child { border-radius:6px 0 0 6px; }
+  .mode button.mseg.lastseg { border-radius:0 6px 6px 0; }
+  .mode button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .mode button.aux { margin-left:8px; border-radius:6px; }
+  .mode button:disabled { opacity:.5; }
+  #exportBtn { margin-left:8px; font:13px system-ui, sans-serif; color:var(--accent2);
+               text-decoration:none; align-self:center; }
+
+  .panel { max-width:860px; margin:8px auto 0; display:none; max-height:360px;
+           overflow-y:auto; font:13px system-ui, sans-serif; }
+  .panel.open { display:block; }
+  .panel table { width:100%; border-collapse:collapse; background:var(--card);
+                 border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .panel th, .panel td { text-align:left; padding:6px 12px; border-bottom:1px solid var(--line); }
+  .panel th { background:#eef1f4; color:var(--muted); font-weight:600; }
+  .panel tr:last-child td { border-bottom:0; }
+  .panel td.num { text-align:right; color:var(--muted); }
+  .panel .t { cursor:pointer; } .panel .t:hover { color:var(--accent); }
+  .panel a, .panel button.x, .panel button.e { margin-left:8px; border:0; background:none;
+       cursor:pointer; color:var(--accent2); text-decoration:none; font-size:13px; }
+  #tlPanel { background:var(--card); border:1px solid var(--line); border-radius:8px;
+             padding:8px 14px; }
+  #tlPanel h3 { font:600 13px system-ui; color:var(--accent); margin:10px 0 4px;
+                border-bottom:1px solid var(--line); }
+  #tlPanel .art { padding:2px 0 2px 10px; cursor:pointer; }
+  #tlPanel .art:hover { color:var(--accent); }
+  #tlPanel .art small { color:var(--muted); }
+  .replay-note { font:12px system-ui, sans-serif; color:var(--muted);
+                 text-align:center; margin:10px 0; }
+  .folderline { color:var(--muted); padding:6px 2px; }
+
+  #log { max-width:860px; margin:0 auto; padding:20px 16px 130px; }
+  .msg { margin:14px 0; padding:14px 18px; border-radius:10px; white-space:pre-wrap; }
+  .q { background:#e5ecf2; margin-left:15%; }
+  .a { background:var(--card); border:1px solid var(--line); margin-right:5%;
+       box-shadow:0 1px 3px rgba(0,0,0,.04); }
+  .err { background:#fbe9e5; border:1px solid #f0c4ba; }
+  .prog { font:13px system-ui, sans-serif; color:var(--muted); }
+  .persona-tag { display:inline-block; font:11px system-ui, sans-serif; color:#fff;
+                 background:var(--accent2); border-radius:4px; padding:1px 7px; margin-bottom:8px; }
+  .pq { border-left:3px solid var(--accent2); margin:12px 0; padding:8px 16px;
+        background:var(--card); border-radius:0 8px 8px 0; font-style:italic; }
+  .pq.ok { cursor:pointer; }
+  .pq.ok:hover { border-left-color:var(--accent); background:#f4f9fd; }
+  .pq .vmark { font:11px system-ui, sans-serif; font-style:normal; display:block;
+               margin-top:6px; }
+  .pq .vmark.good { color:#3a7d44; }
+  .pq .vmark.bad { color:#a33; }
+  .thinking::after { content:'…'; animation: dots 1.2s steps(4) infinite; }
+  @keyframes dots { 0%{content:''} 25%{content:'.'} 50%{content:'..'} 75%{content:'...'} }
+
+  details.sources { margin-top:10px; font-size:13.5px; color:var(--muted);
+                    font-family:system-ui, sans-serif; }
+  details.sources summary { cursor:pointer; }
+  .src { margin:4px 0 0 14px; cursor:pointer; }
+  .src:hover, .src:hover b { color:var(--accent); }
+  .src b { color:var(--ink); font-weight:600; }
+  .src::after { content:' — read ▸'; font-size:11px; opacity:0; }
+  .src:hover::after { opacity:.8; }
+
+  .modalWrap { display:none; position:fixed; inset:0; z-index:50;
+               background:rgba(34,39,46,.45); }
+  .modalWrap.open { display:flex; align-items:center; justify-content:center; }
+  .modal { background:var(--bg); width:min(720px, 92vw); max-height:min(84vh, 900px);
+           border-radius:12px; box-shadow:0 12px 48px rgba(0,0,0,.35);
+           display:flex; flex-direction:column; overflow:hidden; }
+  .mHead { padding:16px 22px 12px; border-bottom:1px solid var(--line);
+           display:flex; align-items:baseline; gap:12px; }
+  .mHead h2 { font-size:18px; color:var(--accent); margin:0; flex:1; }
+  .mHead .meta { font:12.5px system-ui, sans-serif; color:var(--muted); white-space:nowrap; }
+  .mHead a { font:12.5px system-ui, sans-serif; color:var(--accent2); text-decoration:none; }
+  .mHead .close { border:0; background:none; font-size:20px; cursor:pointer; color:var(--muted); }
+  #rBody { overflow-y:auto; padding:18px 24px 28px; font-size:16.5px; line-height:1.7;
+           white-space:pre-wrap; }
+  #rBody mark { background:#fbe9a8; padding:1px 0; }
+  .rMore { display:block; margin:10px auto; font:13px system-ui, sans-serif;
+           padding:6px 16px; border:1px solid var(--line); background:var(--card);
+           border-radius:14px; cursor:pointer; }
+
+  /* new-collection wizard */
+  #wizBody { overflow-y:auto; padding:18px 24px 24px; font:14px system-ui, sans-serif; }
+  #wizBody label { display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
+  #wizBody input[type=text] { width:100%; font:15px system-ui, sans-serif; padding:9px 11px;
+      border:1px solid var(--line); border-radius:6px; background:var(--card); }
+  #wizBody .row { display:flex; gap:10px; align-items:center; }
+  #wizBody .hint { font-size:12px; color:var(--muted); margin-top:3px; }
+  #wizGo { margin-top:18px; font:15px system-ui, sans-serif; padding:10px 22px; border:0;
+           border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  #wizGo:disabled { opacity:.5; }
+  #wizProg { margin-top:14px; font:13px ui-monospace, monospace; color:var(--muted);
+             white-space:pre-wrap; max-height:200px; overflow-y:auto; }
+
+  #welcome { max-width:640px; margin:60px auto 0; padding:0 24px; text-align:center;
+             font-family:system-ui, sans-serif; }
+  #welcome h2 { color:var(--accent); font-family:Georgia, serif; }
+  #welcome p { color:var(--muted); }
+  #welcome button { font:16px Georgia, serif; padding:12px 26px; border:0; margin-top:10px;
+      border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+
+  #quoteCard { max-width:640px; margin:34px auto 0; padding:0 24px; position:relative; }
+  #quoteCard blockquote { margin:0; font-size:18.5px; line-height:1.65;
+      font-style:italic; color:var(--ink); }
+  #quoteCard blockquote::before { content:'“'; font-size:42px; color:var(--accent2);
+      float:left; margin:2px 8px 0 -22px; line-height:.8; }
+  #qAttr { margin-top:10px; font:13px system-ui, sans-serif; color:var(--muted);
+           text-align:right; cursor:pointer; }
+  #qAttr:hover { color:var(--accent); }
+  #qShuffle { position:absolute; right:-6px; top:-4px; border:0; background:none;
+      font-size:17px; color:var(--muted); cursor:pointer; }
+  #qShuffle:hover { color:var(--accent); }
+  #starters { max-width:860px; margin:26px auto 0; padding:0 16px;
+              font-family:system-ui, sans-serif; }
+  #starters p { color:var(--muted); font-size:13px; margin:0 0 8px; }
+  #starters button { display:inline-block; margin:0 8px 8px 0; padding:8px 14px;
+      font:14px Georgia, serif; background:var(--card); color:var(--ink);
+      border:1px solid var(--line); border-radius:18px; cursor:pointer; }
+  #starters button:hover { border-color:var(--accent); color:var(--accent); }
+
+  form.askbar { position:fixed; bottom:0; left:0; right:0;
+         background:linear-gradient(transparent, var(--bg) 30%); padding:24px 16px 20px; }
+  .bar { max-width:860px; margin:0 auto; display:flex; gap:8px; }
+  .bar input { flex:1; font:16px Georgia, serif; padding:12px 14px; border:1px solid var(--line);
+          border-radius:8px; background:var(--card); }
+  .bar input:focus { outline:2px solid var(--accent2); border-color:transparent; }
+  .bar button { font:15px system-ui, sans-serif; padding:0 20px; border:0;
+                border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  .bar button:disabled { opacity:.5; }
+  footer { position:fixed; bottom:2px; right:10px; font:11px system-ui, sans-serif;
+           color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="head-row">
+    <h1>Tanong at Sagot</h1>
+    <select id="colSelect" onchange="switchCollection(this.value)"></select>
+    <span id="collstats" onclick="toggle(libPanel)" title="sources in this collection"></span>
+    <div class="mode" id="modeBar">
+      <span id="modeBtns"></span>
+      <button class="aux" id="importBtn" title="Add a document to this collection"
+              onclick="fileInput.click()">＋ Import</button>
+      <button class="aux" id="rescanBtn" title="Re-scan the folder and update the index"
+              onclick="rescan(false)">⟳ Rescan</button>
+      <button class="aux" id="histBtn" title="Saved conversations" onclick="toggleHistory()">🕘</button>
+      <button class="aux" id="tlBtn" title="Browse sections by year"
+              onclick="toggleTimeline()" style="display:none">📅</button>
+      <button class="aux" id="newBtn" title="Start a new conversation" onclick="newConversation()">New</button>
+      <a id="exportBtn" title="Export this conversation as Markdown" href="#"
+         style="display:none">⬇</a>
+      <input id="fileInput" type="file" accept=".pdf,.txt,.md,.docx,.html" hidden>
+    </div>
+  </div>
+  <div id="libPanel" class="panel"></div>
+  <div id="histPanel" class="panel"></div>
+  <div id="tlPanel" class="panel"></div>
+</header>
+
+<div id="welcome" style="display:none">
+  <h2>Ask questions of any documents</h2>
+  <p>Create a collection from a folder of PDFs, Word files, Markdown, or text —
+     everything stays on your machine.</p>
+  <button onclick="openWizard()">＋ Create your first collection</button>
+</div>
+
+<div id="quoteCard" style="display:none">
+  <blockquote id="qText"></blockquote>
+  <div id="qAttr"></div>
+  <button id="qShuffle" title="Another quote" onclick="loadQuote()">⟳</button>
+</div>
+
+<div id="starters" style="display:none">
+  <p>Try asking:</p>
+  <span id="starterBtns"></span>
+</div>
+
+<div id="log"></div>
+
+<form class="askbar" onsubmit="return send(event)">
+  <div class="bar">
+    <input id="q" placeholder="Ask this collection…" autocomplete="off" autofocus>
+    <button id="go">Ask</button>
+    <button type="button" id="addColBtn" title="New collection" onclick="openWizard()">＋</button>
+  </div>
+</form>
+<footer id="modelinfo"></footer>
+
+<div id="readerWrap" class="modalWrap" onclick="if(event.target===this)closeReader()">
+  <div class="modal">
+    <div class="mHead">
+      <h2 id="rTitle"></h2>
+      <span class="meta" id="rMeta"></span>
+      <a id="rTab" href="#" target="_blank" title="open in new tab">↗</a>
+      <button class="close" onclick="closeReader()" title="close">✕</button>
+    </div>
+    <div id="rBody"></div>
+  </div>
+</div>
+
+<div id="wizWrap" class="modalWrap" onclick="if(event.target===this)closeWizard()">
+  <div class="modal">
+    <div class="mHead">
+      <h2>New collection</h2>
+      <button class="close" onclick="closeWizard()" title="close">✕</button>
+    </div>
+    <div id="wizBody">
+      <label>Name</label>
+      <input type="text" id="wName" placeholder="e.g. Research papers">
+      <label>Folder to link (optional)</label>
+      <input type="text" id="wLink" placeholder="/path/to/your/documents">
+      <div class="hint">Leave empty to create an empty collection and import
+        files one by one. A linked folder is only read, never written to.</div>
+      <label>Author (optional — for single-author corpora)</label>
+      <div class="row">
+        <input type="text" id="wAuthor" placeholder="e.g. Jane Author" style="flex:1">
+        <label style="margin:0"><input type="checkbox" id="wPersona">
+          enable persona mode</label>
+      </div>
+      <label>Description (optional)</label>
+      <input type="text" id="wDesc" placeholder="one line about what this is">
+      <button id="wizGo" onclick="createCollection()">Create & index</button>
+      <div id="wizProg"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+let COL = null, STATS = null, mode = 'scholar';
+const api = p => '/c/' + encodeURIComponent(COL) + p;
+const $ = id => document.getElementById(id);
+
+function toggle(panel) {
+  for (const p of document.querySelectorAll('.panel'))
+    if (p !== panel) p.classList.remove('open');
+  panel.classList.toggle('open');
+}
+
+// ------------------------------------------------------------- collections
+async function loadCollections(selectId) {
+  const cols = await (await fetch('/collections')).json();
+  const sel = $('colSelect');
+  sel.innerHTML = '';
+  for (const c of cols) {
+    const o = document.createElement('option');
+    o.value = c.id;
+    o.textContent = c.name + ' (' + c.sources + ')';
+    sel.appendChild(o);
+  }
+  if (!cols.length) {
+    $('welcome').style.display = '';
+    $('modeBar').style.visibility = 'hidden';
+    sel.style.display = 'none';
+    return;
+  }
+  $('welcome').style.display = 'none';
+  $('modeBar').style.visibility = '';
+  sel.style.display = '';
+  const stored = localStorage.getItem('anyrag-col');
+  const pick = selectId || (cols.some(c => c.id === stored) ? stored : cols[0].id);
+  sel.value = pick;
+  await switchCollection(pick);
+}
+
+async function switchCollection(id) {
+  COL = id;
+  localStorage.setItem('anyrag-col', id);
+  setConv(null);
+  $('log').textContent = '';
+  $('quoteCard').style.display = 'none';
+  for (const p of document.querySelectorAll('.panel')) p.classList.remove('open');
+  await loadStats();
+  loadQuote();
+  $('q').focus();
+}
+
+async function loadStats() {
+  try {
+    STATS = await (await fetch(api('/stats'))).json();
+  } catch (e) { STATS = null; }
+  if (!STATS || STATS.error) {
+    $('collstats').textContent = 'not indexed yet';
+    $('starters').style.display = 'none';
+    const d = addMsg('a', 'This collection has no index yet. ');
+    const b = document.createElement('button');
+    b.textContent = 'Index it now';
+    b.onclick = () => { d.remove(); rescan(false); };
+    d.appendChild(b);
+    return;
+  }
+  $('collstats').textContent = STATS.works.length + ' sources · '
+      + STATS.total_chunks.toLocaleString() + ' passages ▾';
+  $('modelinfo').textContent = STATS.retrieval.replace('Index','') + ' retrieval · '
+      + STATS.backend + ' / ' + STATS.model;
+  renderModes();
+  renderLibrary();
+  $('tlBtn').style.display = STATS.show_timeline ? '' : 'none';
+  $('importBtn').style.display = STATS.linked ? 'none' : '';
+  renderStarters();
+}
+
+function renderModes() {
+  const box = $('modeBtns');
+  box.innerHTML = '';
+  const labels = {scholar: 'Scholar', quotes: 'Quotes', persona: 'Persona'};
+  const modes = STATS.modes;
+  if (!modes.includes(mode)) mode = 'scholar';
+  modes.forEach((m, i) => {
+    const b = document.createElement('button');
+    b.className = 'mseg' + (i === modes.length - 1 ? ' lastseg' : '');
+    b.textContent = labels[m] || m;
+    b.classList.toggle('on', m === mode);
+    b.onclick = () => { mode = m; renderModes(); };
+    box.appendChild(b);
+  });
+  $('q').placeholder = mode === 'persona' ? 'Ask the author directly…'
+      : mode === 'quotes' ? 'Ask — answered in exact quotations…'
+      : 'Ask this collection…';
+}
+
+function renderStarters() {
+  const box = $('starterBtns');
+  box.innerHTML = '';
+  const qs = [];
+  qs.push('What are the main themes of this collection?');
+  const w = STATS.works[0];
+  if (w) qs.push('Summarize the key points of “' + w.title + '”.');
+  if (STATS.show_timeline) qs.push('How did the ideas here evolve over time?');
+  if (STATS.author) qs.push('What does ' + STATS.author + ' argue most often?');
+  for (const s of qs) {
+    const b = document.createElement('button');
+    b.textContent = s;
+    b.onclick = () => { $('q').value = s; send(new Event('x')); };
+    box.appendChild(b);
+  }
+  $('starters').style.display = '';
+}
+
+function renderLibrary() {
+  const lib = $('libPanel');
+  lib.innerHTML = '';
+  const fl = document.createElement('div');
+  fl.className = 'folderline';
+  fl.textContent = (STATS.linked ? 'Linked folder: ' : 'Managed folder: ')
+      + STATS.folder;
+  lib.appendChild(fl);
+  const tbl = document.createElement('table');
+  tbl.innerHTML = '<tr><th>Source</th><th>Years</th><th style="text-align:right">Sections</th>'
+      + '<th style="text-align:right">Passages</th><th>Segmentation</th><th></th></tr>';
+  for (const w of STATS.works) {
+    const tr = document.createElement('tr');
+    const t = document.createElement('td');
+    t.textContent = w.title;
+    const y = document.createElement('td');
+    y.className = 'num';
+    y.textContent = w.years ? w.years[0] + '–' + w.years[1] : '';
+    const es = document.createElement('td'); es.className = 'num'; es.textContent = w.essays;
+    const ch = document.createElement('td'); ch.className = 'num'; ch.textContent = w.chunks;
+    const sg = document.createElement('td'); sg.className = 'num';
+    sg.textContent = w.segmentation || '';
+    sg.title = 'How sections were detected';
+    const act = document.createElement('td');
+    const e = document.createElement('button');
+    e.className = 'e'; e.textContent = '✎'; e.title = 'Edit title / years';
+    e.onclick = () => editSourceMeta(w);
+    act.appendChild(e);
+    tr.append(t, y, es, ch, sg, act);
+    tbl.appendChild(tr);
+  }
+  lib.appendChild(tbl);
+}
+
+async function editSourceMeta(w) {
+  const title = prompt('Display title for ' + w.source, w.title);
+  if (title === null) return;
+  let years = prompt('Year range (e.g. 1990-2001, empty for none)',
+                     w.years ? w.years[0] + '-' + w.years[1] : '');
+  if (years === null) return;
+  const m = years.match(/(\d{4})\s*[-–]\s*(\d{4})/);
+  const body = {filename: w.source, title: title.trim() || null,
+                years: m ? [+m[1], +m[2]] : null};
+  const r = await fetch(api('/source-meta'), {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  if (r.ok) loadStats();
+}
+
+// -------------------------------------------------------------- new wizard
+function openWizard() { $('wizWrap').classList.add('open'); $('wName').focus(); }
+function closeWizard() { $('wizWrap').classList.remove('open'); $('wizProg').textContent=''; }
+
+async function createCollection() {
+  const name = $('wName').value.trim();
+  if (!name) { $('wName').focus(); return; }
+  $('wizGo').disabled = true;
+  const prog = $('wizProg');
+  prog.textContent = 'Creating…\n';
+  try {
+    const body = {name, link: $('wLink').value.trim() || null,
+                  description: $('wDesc').value.trim(),
+                  author: $('wAuthor').value.trim()};
+    if ($('wPersona').checked && body.author)
+      body.persona = {enabled: true};
+    const r = await fetch('/collections', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const res = await r.json();
+    if (res.error) throw new Error(res.error);
+    COL = res.id;
+    if (res.sources > 0) {
+      prog.textContent += 'Indexing ' + res.sources + ' document(s)…\n';
+      await streamIngest(false, ev => {
+        prog.textContent += (ev.source ? ev.source + ': ' : '')
+            + (ev.status || ev.stage) + '\n';
+        prog.scrollTop = prog.scrollHeight;
+      });
+    } else {
+      prog.textContent += 'Empty collection created — use ＋ Import to add files.\n';
+    }
+    closeWizard();
+    await loadCollections(COL);
+  } catch (err) {
+    prog.textContent += 'Failed: ' + err.message + '\n';
+  }
+  $('wizGo').disabled = false;
+}
+
+async function streamIngest(force, onEvent) {
+  const r = await fetch(api('/ingest?force=' + (force ? 1 : 0)), {method: 'POST'});
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onEvent(JSON.parse(line));
+    }
+  }
+}
+
+async function rescan(force) {
+  $('rescanBtn').disabled = true;
+  const note = addMsg('a prog', 'Scanning ' + (STATS ? STATS.folder : '') + '…\n');
+  try {
+    await streamIngest(force, ev => {
+      note.textContent += (ev.source ? ev.source + ': ' : '')
+          + (ev.status || ev.stage) + '\n';
+      note.scrollIntoView({behavior: 'instant', block: 'end'});
+    });
+    await loadStats();
+  } catch (err) { note.className = 'msg err'; note.textContent = 'Ingest failed: ' + err; }
+  $('rescanBtn').disabled = false;
+}
+
+// ------------------------------------------------------------------ import
+fileInput.onchange = async () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  importBtn.disabled = true; importBtn.textContent = 'Importing…';
+  const note = addMsg('a', 'Importing "' + f.name + '" — chunking' +
+                        ' (and embedding, if available)…');
+  try {
+    const r = await fetch(api('/import'), {method: 'POST',
+      headers: {'X-Filename': f.name}, body: f});
+    const res = await r.json();
+    if (res.error) { note.className = 'msg err'; note.textContent = res.error; }
+    else {
+      note.textContent = 'Imported "' + res.work + '": ' + res.chunks +
+        ' passages' + (res.embedded ? ', embedded' : ' (keyword search only)') +
+        '. Ready to ask.';
+      loadStats();
+    }
+  } catch (err) { note.className = 'msg err'; note.textContent = 'Import failed: ' + err; }
+  importBtn.disabled = false; importBtn.textContent = '＋ Import';
+  fileInput.value = '';
+};
+
+function addMsg(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  log.appendChild(d);
+  d.scrollIntoView({behavior: 'smooth', block: 'end'});
+  return d;
+}
+
+// ------------------------------------------------------------- quote card
+async function loadQuote() {
+  try {
+    const r = await fetch(api('/quote'));
+    if (!r.ok) { $('quoteCard').style.display = 'none'; return; }
+    const qt = await r.json();
+    $('qText').textContent = qt.text;
+    $('qAttr').textContent = '— ' + qt.essay +
+        (qt.year ? ' (' + qt.year + ')' : '') + ', ' + qt.work;
+    $('qAttr').onclick = () => openReader(qt.chunk_id);
+    $('qAttr').title = 'Read in context';
+    $('quoteCard').style.display = '';
+  } catch (e) { /* bank absent: card stays hidden */ }
+}
+
+// -------------------------------------------------------------- timeline
+async function toggleTimeline() {
+  if (tlPanel.classList.contains('open')) { tlPanel.classList.remove('open'); return; }
+  const tl = await (await fetch(api('/timeline'))).json();
+  tlPanel.textContent = '';
+  const addArt = (e, label) => {
+    const d = document.createElement('div');
+    d.className = 'art';
+    d.textContent = e.essay + ' ';
+    const s = document.createElement('small');
+    s.textContent = '— ' + e.work + (label ? ' · ' + label : '');
+    d.appendChild(s);
+    d.title = 'Open the full section';
+    d.onclick = () => window.open(api('/read?id=' + encodeURIComponent(e.id)), '_blank');
+    tlPanel.appendChild(d);
+  };
+  let year = null;
+  for (const e of tl.dated) {
+    if (e.year !== year) {
+      year = e.year;
+      const h = document.createElement('h3');
+      h.textContent = year;
+      tlPanel.appendChild(h);
+    }
+    addArt(e, e.precision === 'day' || e.precision === 'month' ? e.date : '');
+  }
+  if (tl.undated.length) {
+    const h = document.createElement('h3');
+    h.textContent = 'Undated (grouped by source)';
+    tlPanel.appendChild(h);
+    for (const e of tl.undated) addArt(e, '');
+  }
+  toggle(tlPanel);
+}
+
+// ---------------------------------------------------------- conversations
+let convId = null;
+
+function setConv(id) {
+  convId = id;
+  exportBtn.style.display = id ? '' : 'none';
+  if (id) exportBtn.href = api('/conversation/' + encodeURIComponent(id) + '/export?format=md');
+}
+
+function newConversation() {
+  setConv(null);
+  log.textContent = '';
+  histPanel.classList.remove('open');
+  starters.style.display = '';
+  $('q').focus();
+}
+
+async function toggleHistory() {
+  if (histPanel.classList.contains('open')) { histPanel.classList.remove('open'); return; }
+  const list = await (await fetch(api('/conversations'))).json();
+  histPanel.textContent = '';
+  if (!list.length) { histPanel.textContent = 'No saved conversations yet.'; }
+  else {
+    const tbl = document.createElement('table');
+    for (const c of list) {
+      const tr = document.createElement('tr');
+      const t = document.createElement('td');
+      t.className = 't'; t.textContent = c.title;
+      t.onclick = () => openConversation(c.id);
+      const d = document.createElement('td');
+      d.className = 'num'; d.textContent = (c.date || '').slice(0, 10) + ' · ' + c.turns + ' turn' + (c.turns > 1 ? 's' : '');
+      const acts = document.createElement('td');
+      acts.style.textAlign = 'right';
+      const md = document.createElement('a');
+      md.textContent = '⬇ md'; md.title = 'Export as Markdown';
+      md.href = api('/conversation/' + encodeURIComponent(c.id) + '/export?format=md');
+      const del = document.createElement('button');
+      del.className = 'x'; del.textContent = '✕'; del.title = 'Delete';
+      del.onclick = async () => {
+        await fetch(api('/conversation/' + encodeURIComponent(c.id)), {method: 'DELETE'});
+        tr.remove();
+      };
+      acts.appendChild(md); acts.appendChild(del);
+      tr.appendChild(t); tr.appendChild(d); tr.appendChild(acts);
+      tbl.appendChild(tr);
+    }
+    histPanel.appendChild(tbl);
+  }
+  toggle(histPanel);
+}
+
+function renderAnswer(el, turn) {
+  el.textContent = '';
+  if (turn.mode === 'persona') {
+    const tag = document.createElement('span');
+    tag.className = 'persona-tag';
+    tag.textContent = 'AI persona — reconstructed from the documents';
+    el.appendChild(tag);
+    el.appendChild(document.createElement('br'));
+  }
+  if (turn.mode === 'quotes' && (turn.answer || '').includes('>')) {
+    const holder = document.createElement('div');
+    renderQuotes(holder, turn.answer, turn.verify);
+    el.appendChild(holder);
+  } else {
+    el.appendChild(document.createTextNode(
+      (turn.answer || '').replace(/^\*\[[^\]]*\]\*\s*/, '')));
+  }
+  if (turn.sources && turn.sources.length) el.appendChild(sourcesBlock(turn.sources));
+}
+
+async function openConversation(id) {
+  const turns = await (await fetch(api('/conversation/' + encodeURIComponent(id)))).json();
+  histPanel.classList.remove('open');
+  starters.style.display = 'none';
+  log.textContent = '';
+  const note = document.createElement('div');
+  note.className = 'replay-note';
+  note.textContent = 'Saved conversation — new questions will continue it.';
+  log.appendChild(note);
+  for (const t of turns) {
+    addMsg('q', t.question);
+    renderAnswer(addMsg('a', ''), t);
+  }
+  setConv(id);
+}
+
+// ------------------- quotes mode: structured re-render after verification
+function renderQuotes(el, fullText, results) {
+  el.textContent = '';
+  const lines = fullText.split('\n');
+  let qi = 0, buf = [];
+  const flushQuote = () => {
+    if (!buf.length) return;
+    const raw = buf.join(' ');
+    const d = document.createElement('div');
+    d.className = 'pq';
+    d.appendChild(document.createTextNode(raw));
+    const r = results && results[qi];
+    if (r) {
+      const v = document.createElement('span');
+      v.className = 'vmark ' + (r.ok ? 'good' : 'bad');
+      v.textContent = r.ok ? '✓ verified against the source'
+                           : '⚠ not found verbatim in the sources';
+      d.appendChild(v);
+      if (r.ok && r.chunk_id) {
+        d.classList.add('ok');
+        d.title = 'Read in context';
+        d.onclick = () => openReader(r.chunk_id);
+      }
+    }
+    el.appendChild(d);
+    qi++; buf = [];
+  };
+  for (const line of lines) {
+    if (line.trimStart().startsWith('>')) {
+      buf.push(line.trimStart().replace(/^>+\s?/, ''));
+    } else {
+      flushQuote();
+      if (line.trim()) {
+        const p = document.createElement('div');
+        p.textContent = line;
+        el.appendChild(p);
+      }
+    }
+  }
+  flushQuote();
+}
+
+// ---------------------------------------------------- source reader modal
+let rId = null, rBefore = 1, rAfter = 1;
+
+async function loadPassage() {
+  const r = await fetch(api('/passage?id=' + encodeURIComponent(rId) +
+                        '&before=' + rBefore + '&after=' + rAfter));
+  const p = await r.json();
+  const body = $('rBody');
+  if (p.error) { body.textContent = p.error; return; }
+  $('rTitle').textContent = p.essay;
+  $('rMeta').textContent = p.work + ' · pp. ' + p.page_start + '–' + p.page_end;
+  $('rTab').href = api('/read?id=' + encodeURIComponent(rId));
+  body.textContent = '';
+  if (p.has_more_before) {
+    const b = document.createElement('button');
+    b.className = 'rMore'; b.textContent = '⬆ earlier';
+    b.onclick = () => { rBefore += 2; loadPassage(); };
+    body.appendChild(b);
+  }
+  body.appendChild(document.createTextNode(p.before + ' '));
+  const m = document.createElement('mark');
+  m.textContent = p.cited;
+  body.appendChild(m);
+  body.appendChild(document.createTextNode(' ' + p.after));
+  if (p.has_more_after) {
+    const b = document.createElement('button');
+    b.className = 'rMore'; b.textContent = '⬇ later';
+    b.onclick = () => { rAfter += 2; loadPassage(); };
+    body.appendChild(b);
+  }
+  m.scrollIntoView({block: 'center'});
+}
+
+function openReader(id) {
+  rId = id; rBefore = 1; rAfter = 1;
+  $('readerWrap').classList.add('open');
+  $('rBody').textContent = 'Loading…';
+  loadPassage();
+}
+
+function closeReader() { $('readerWrap').classList.remove('open'); }
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeReader(); closeWizard(); }
+});
+
+function sourcesBlock(sources) {
+  const det = document.createElement('details');
+  det.className = 'sources';
+  const sum = document.createElement('summary');
+  sum.textContent = 'Sources (' + sources.length + ')';
+  det.appendChild(sum);
+  for (const s of sources) {
+    const d = document.createElement('div');
+    d.className = 'src';
+    const pg = s.page_start === s.page_end ? 'p. ' + s.page_start
+             : 'pp. ' + s.page_start + '–' + s.page_end;
+    const work = s.work || (s.source || '').replace(/\.[^.]+$/, '');
+    const b = document.createElement('b');
+    b.textContent = s.essay;
+    d.appendChild(b);
+    d.appendChild(document.createTextNode(
+      (s.essay === work ? '' : ' — ' + work) +
+      (s.year ? ' (' + s.year + ')' : '') + ', ' + pg));
+    if (s.id) { d.title = 'Read this passage'; d.onclick = () => openReader(s.id); }
+    det.appendChild(d);
+  }
+  return det;
+}
+
+// --------------------------------------------------------------------- ask
+async function send(e) {
+  e.preventDefault && e.preventDefault();
+  if (!COL) { openWizard(); return false; }
+  const question = $('q').value.trim();
+  if (!question) return false;
+  starters.style.display = 'none';
+  quoteCard.style.display = 'none';
+  addMsg('q', question);
+  $('q').value = ''; go.disabled = true;
+  const wait = addMsg('a thinking', 'Consulting the documents');
+  let meta = null, textNode = null, full = '', verify = null;
+  try {
+    const r = await fetch(api('/ask'), {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({question, mode, conversation_id: convId})});
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const ev = JSON.parse(line);
+        if (ev.type === 'meta') {
+          meta = ev;
+          if (ev.conversation_id) setConv(ev.conversation_id);
+          wait.classList.remove('thinking');
+          wait.textContent = '';
+          if (ev.mode === 'persona') {
+            const tag = document.createElement('span');
+            tag.className = 'persona-tag';
+            tag.textContent = 'AI persona — reconstructed from the documents';
+            wait.appendChild(tag);
+            wait.appendChild(document.createElement('br'));
+          }
+          textNode = document.createTextNode('');
+          wait.appendChild(textNode);
+        } else if (ev.type === 'delta') {
+          if (!textNode) {          // defensive: meta not seen yet
+            wait.classList.remove('thinking');
+            wait.textContent = '';
+            textNode = document.createTextNode('');
+            wait.appendChild(textNode);
+          }
+          textNode.data += ev.text;
+          full += ev.text;
+        } else if (ev.type === 'verify') {
+          verify = ev.quotes;
+        } else if (ev.type === 'error') {
+          wait.classList.remove('thinking');
+          wait.className = 'msg err';
+          wait.textContent = ev.error;
+          meta = null;
+        }
+      }
+      wait.scrollIntoView({behavior: 'instant', block: 'end'});
+    }
+    if (meta && meta.mode === 'quotes' && full.includes('>')) {
+      const holder = document.createElement('div');
+      renderQuotes(holder, full, verify);
+      textNode.parentNode.replaceChild(holder, textNode);
+    }
+    if (meta && meta.sources && meta.sources.length)
+      wait.appendChild(sourcesBlock(meta.sources));
+  } catch (err) {
+    wait.classList.remove('thinking');
+    wait.className = 'msg err';
+    wait.textContent = 'Request failed: ' + err;
+  }
+  go.disabled = false; $('q').focus();
+  return false;
+}
+
+loadCollections();
+</script>
+</body>
+</html>

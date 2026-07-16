@@ -1,0 +1,9 @@
+# Desktop app runtime dependencies (see distribution.md).
+# Dev/ingestion deps stay in requirements.txt.
+llama-cpp-python>=0.3
+pywebview>=5.0
+onnxruntime>=1.18
+tokenizers>=0.19
+numpy>=1.26
+pypdf>=4.0
+pyinstaller>=6.6

@@ -1,0 +1,9 @@
+# Core (ingestion + optional formats). Query time is stdlib-only.
+pypdf>=4.0
+python-docx>=1.1
+
+# Optional dense-embedding stack (uncomment to enable the embed stage and
+# hybrid retrieval, then re-run: bash setup.sh && ingest.py -c <id> --force).
+# Heavy (~2 GB with torch) — BM25 works without it.
+#sentence-transformers>=3.0
+#numpy>=1.26
