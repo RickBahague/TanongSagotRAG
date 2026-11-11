@@ -18,37 +18,92 @@ All corpus routes are collection-scoped under /c/<id>/…:
   GET    /c/<id>/conversations      history; /conversation/<cid>[/export]
   GET    /c/<id>/source-meta        editable per-source metadata
   POST   /c/<id>/source-meta        {filename, title?, years?}
+
+Local-server hardening (every request): the Host header must be
+127.0.0.1/localhost on the bound port; an Origin header, when present, must
+be the app's own origin; JSON POSTs need Content-Type application/json and
+a body of at most 10 MB. When the server is made with a per-launch `token`
+(app.py does this), GET /?token=<token> sets an HttpOnly SameSite=Strict
+cookie and redirects to /; every other request must carry that cookie.
 """
+import hmac
 import json
 import re
 import threading
 import urllib.error
+from collections import OrderedDict
+from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 import config
 import conversations
+import errors
 import library
 import rag
 
 INDEX_HTML_FILE = Path(__file__).parent / "static" / "index.html"
 
-_RUNTIMES = {}                 # collection id → rag.Runtime (LRU-ish, max 3)
-_RUNTIME_LOCK = threading.Lock()
+MAX_RUNTIMES = 3
+MAX_JSON_BODY = 10 * 1024 * 1024       # JSON POST bodies
+MAX_UPLOAD = 200 * 1024 * 1024          # /import raw uploads
+# POST routes whose body is NOT JSON (exempt from the Content-Type rule)
+_NON_JSON_POSTS = ("/ingest", "/import")
+
+# rag.load_sources raises errors.NotIndexed for a collection with no chunks
+# (older rag.py raised SystemExit); both mean "not indexed" to the server.
+NOT_INDEXED = (errors.NotIndexed, SystemExit)
+
+_RUNTIMES = OrderedDict()      # collection id → rag.Runtime (LRU, max 3)
+_RUNTIME_LOCK = threading.Lock()  # guards _RUNTIMES/_LOAD_LOCKS only (fast)
+_LOAD_LOCKS = {}               # collection id → Lock held while loading it
 _INGEST_LOCK = threading.Lock()   # one ingest at a time (embed/LLM heavy)
 
 
+def not_indexed_msg(cid):
+    return (f"Collection {cid!r} is not indexed yet — run ingest "
+            f"(Index it now / Rescan) first.")
+
+
 def runtime(cid, reload=False):
-    """Load-once query runtime per collection; evict oldest beyond 3."""
+    """Load-once query runtime per collection, LRU-evicted beyond
+    MAX_RUNTIMES. The (slow) index load runs outside _RUNTIME_LOCK under a
+    per-collection lock, so other collections are never blocked and the
+    same collection is never loaded twice concurrently. With reload=True
+    the old runtime keeps serving other requests until the new one is
+    ready. Raises KeyError (unknown collection) or NOT_INDEXED."""
     with _RUNTIME_LOCK:
-        if reload:
-            _RUNTIMES.pop(cid, None)
-        if cid not in _RUNTIMES:
+        if not reload and cid in _RUNTIMES:
+            _RUNTIMES.move_to_end(cid)
+            return _RUNTIMES[cid]
+        load_lock = _LOAD_LOCKS.setdefault(cid, threading.Lock())
+    with load_lock:
+        if not reload:
+            with _RUNTIME_LOCK:               # loaded while we waited?
+                if cid in _RUNTIMES:
+                    _RUNTIMES.move_to_end(cid)
+                    return _RUNTIMES[cid]
+        try:
             col = library.get(cid)                    # KeyError → 404
-            _RUNTIMES[cid] = rag.Runtime(col)
-            while len(_RUNTIMES) > 3:
-                _RUNTIMES.pop(next(iter(_RUNTIMES)))
-        return _RUNTIMES[cid]
+            rt = rag.Runtime(col)
+        except BaseException:
+            if reload:                        # stale index must not linger
+                with _RUNTIME_LOCK:
+                    _RUNTIMES.pop(cid, None)
+            raise
+        with _RUNTIME_LOCK:
+            _RUNTIMES[cid] = rt
+            _RUNTIMES.move_to_end(cid)
+            while len(_RUNTIMES) > MAX_RUNTIMES:
+                _RUNTIMES.popitem(last=False)
+        return rt
+
+
+def forget_runtime(cid):
+    with _RUNTIME_LOCK:
+        _RUNTIMES.pop(cid, None)
+        _LOAD_LOCKS.pop(cid, None)
 
 
 READ_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -116,12 +171,35 @@ def import_work(col, filename, data):
         raise ValueError("This collection links a folder on disk — add the "
                          "file there and press Rescan instead.")
     col.ensure_dirs()
+    # a schema-1 (stem-keyed) collection is re-keyed first, or the new
+    # source's full-filename files would sit next to stale stem-keyed ones
+    ingest.migrate_layout(col)
     src = col.sources_dir / name
     src.write_bytes(data)
 
-    # stage 1 — chunk (always first)
-    res = ingest.chunk_source(col, src, force=True)
-    _, n, rung = res
+    # stage 1 — chunk (always first). The new file can change the chunk-id
+    # prefix of a same-stem sibling (ingest.chunk_id_prefixes): re-chunk
+    # those too, and record every result in the manifest so the next plain
+    # ingest sees them as up to date.
+    manifest = ingest.load_manifest(col)
+    params = ingest.chunk_params(col)
+    prefixes = ingest.chunk_id_prefixes(s.name for s in col.source_files())
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    n = rung = None
+    cut = Path(name).stem[:ingest.ID_PREFIX_LEN]
+    for s in col.source_files():
+        if s.name != name and Path(s.name).stem[:ingest.ID_PREFIX_LEN] != cut:
+            continue                         # unrelated source: untouched
+        sha = ingest.file_hash(s)
+        r = ingest.chunk_source(col, s, force=(s.name == name),
+                                prev=manifest.get(s.name), src_sha256=sha,
+                                id_prefix=prefixes[s.name])
+        if r:
+            ingest.record_chunked(manifest.setdefault(s.name, {}), r, now,
+                                  sha, params, prefixes[s.name])
+        if s.name == name:
+            _, n, rung = r
+    ingest.save_manifest(col, manifest)
     ingest.detect_source_meta(col, src)
     # stage 1c/1d — dates + quote bank (hash-idempotent, cheap)
     import dates
@@ -133,12 +211,12 @@ def import_work(col, filename, data):
     try:
         import numpy as np
         enc = rag._query_encoder()
-        chunk_file = col.chunks_dir / (src.stem + ".jsonl")
+        chunk_file = col.chunk_file(name)
         chunks = [json.loads(l) for l in open(chunk_file)]
         vecs = enc.encode([c["text"] for c in chunks],
                           normalize_embeddings=True, show_progress_bar=False)
         col.vectors_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(col.vectors_dir / (chunk_file.stem + ".npz"),
+        np.savez(col.vectors_dir / (col.artifact_key(name) + ".npz"),
                  vectors=np.asarray(vecs, dtype="float32"),
                  model=np.array(config.EMBED_MODEL),
                  src_hash=np.array(ingest.file_hash(chunk_file)))
@@ -205,11 +283,33 @@ def timeline(rt):
     return {"dated": dated, "undated": coarse}
 
 
+class RequestError(Exception):
+    """Refuse a request with an HTTP status before routing it."""
+
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+
+
+def _cookie_name(port):
+    # cookies are not port-isolated: two app instances on 127.0.0.1 must
+    # not overwrite each other's token
+    return f"anyrag_token_{port}"
+
+
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="application/json"):
+    _streaming = False             # True once an NDJSON response has begun
+
+    def _send(self, code, body, ctype="application/json", headers=()):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in headers:
+            self.send_header(k, v)
+        if code >= 400 and self.command in ("POST", "PUT", "DELETE"):
+            # the request body may be unread: never reuse this connection
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.end_headers()
         self.wfile.write(body)
 
@@ -219,21 +319,138 @@ class Handler(BaseHTTPRequestHandler):
     def _err(self, code, msg):
         self._json({"error": msg}, code)
 
+    def _content_length(self, cap):
+        """Declared body length, validated BEFORE anything is read."""
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            if self.headers.get("Transfer-Encoding"):
+                raise RequestError(411, "Content-Length required")
+            return 0
+        try:
+            length = int(raw.strip())
+        except ValueError:
+            raise RequestError(400, "invalid Content-Length")
+        if length < 0:
+            raise RequestError(400, "invalid Content-Length")
+        if length > cap:
+            raise RequestError(413, f"request body too large "
+                                    f"({cap // (1024 * 1024)} MB max)")
+        return length
+
     def _body(self):
-        length = int(self.headers.get("Content-Length", 0))
-        return json.loads(self.rfile.read(length)) if length else {}
+        """Parsed JSON body: Content-Type must be application/json and the
+        declared length at most MAX_JSON_BODY (checked before reading)."""
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0]
+        if ctype.strip().lower() != "application/json":
+            raise RequestError(415, "Content-Type must be application/json")
+        length = self._content_length(MAX_JSON_BODY)
+        if not length:
+            return {}
+        try:
+            obj = json.loads(self.rfile.read(length))
+        except ValueError:
+            raise RequestError(400, "invalid JSON body")
+        if not isinstance(obj, dict):
+            raise RequestError(400, "JSON body must be an object")
+        return obj
 
     def _route(self):
         """(collection_id, tail_path, query) for /c/<id>/… paths."""
-        from urllib.parse import urlparse, parse_qs
         url = urlparse(self.path)
         m = re.match(r"^/c/([\w-]+)(/.*)?$", url.path)
         if not m:
             return None, url.path, parse_qs(url.query)
         return m.group(1), m.group(2) or "/", parse_qs(url.query)
 
-    # ------------------------------------------------------------------ GET
+    # ------------------------------------------------------------ guarding
+    def _allowed_hosts(self):
+        port = self.server.server_address[1]
+        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _check_access(self):
+        """Host allow-list, Origin check, per-launch token. Returns True
+        when the request may proceed; otherwise a response was sent."""
+        hosts = self._allowed_hosts()
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in hosts:
+            self._err(403, "forbidden host")
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and \
+                origin.strip().lower() not in {"http://" + h for h in hosts}:
+            self._err(403, "forbidden origin")
+            return False
+        token = getattr(self.server, "token", None)
+        if not token:
+            return True
+        name = _cookie_name(self.server.server_address[1])
+        url = urlparse(self.path)
+        given = parse_qs(url.query).get("token", [None])[0]
+        if self.command == "GET" and url.path in ("/", "/index.html") \
+                and given is not None:
+            if not hmac.compare_digest(given.encode(), token.encode()):
+                self._err(403, "invalid token")
+                return False
+            self._send(303, b"", "text/plain", headers=(
+                ("Location", "/"),
+                ("Set-Cookie", f"{name}={token}; HttpOnly; "
+                               f"SameSite=Strict; Path=/"),
+                ("Cache-Control", "no-store")))
+            return False
+        from http.cookies import SimpleCookie, CookieError
+        try:
+            jar = SimpleCookie(self.headers.get("Cookie") or "")
+        except CookieError:
+            jar = {}
+        sent = jar[name].value if name in jar else ""
+        if not hmac.compare_digest(sent.encode(), token.encode()):
+            self._err(403, "missing or invalid session token — open the "
+                           "app from its launcher")
+            return False
+        return True
+
+    def _guarded(self, handler):
+        """Run a route handler behind the access checks; turn early
+        refusals and "not indexed" into proper responses instead of a
+        dropped connection."""
+        self._streaming = False        # handler objects serve keep-alives
+        if not self._check_access():
+            return
+        cid = self._route()[0]
+        try:
+            handler()
+        except RequestError as e:
+            if self._streaming:
+                self._stream_error(str(e))
+            else:
+                self._err(e.code, str(e))
+        except NOT_INDEXED:
+            msg = not_indexed_msg(cid)
+            if self._streaming:
+                self._stream_error(msg)
+            else:
+                self._err(409, msg)
+        except BrokenPipeError:
+            pass
+
+    def _stream_error(self, msg):
+        try:
+            self._w({"type": "error", "stage": "error", "error": msg,
+                     "status": msg})
+        except (BrokenPipeError, ConnectionError):
+            pass
+
     def do_GET(self):
+        self._guarded(self._do_GET)
+
+    def do_POST(self):
+        self._guarded(self._do_POST)
+
+    def do_DELETE(self):
+        self._guarded(self._do_DELETE)
+
+    # ------------------------------------------------------------------ GET
+    def _do_GET(self):
         cid, path, qs = self._route()
         try:
             if cid is None:
@@ -321,7 +538,8 @@ class Handler(BaseHTTPRequestHandler):
                     ctype, ext = "application/json", "json"
                 else:
                     body = conversations.to_markdown(
-                        turns, f"{col.name} conversation").encode()
+                        turns, f"{col.name} conversation",
+                        author=col.author).encode()
                     ctype, ext = "text/markdown; charset=utf-8", "md"
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
@@ -336,15 +554,14 @@ class Handler(BaseHTTPRequestHandler):
             self._err(404, "not found")
 
     # --------------------------------------------------------------- DELETE
-    def do_DELETE(self):
+    def _do_DELETE(self):
         cid, path, _ = self._route()
         try:
             if cid is None:
                 m = re.match(r"^/collections/([\w-]+)$", path)
                 if not m:
                     return self._err(404, "not found")
-                with _RUNTIME_LOCK:
-                    _RUNTIMES.pop(m.group(1), None)
+                forget_runtime(m.group(1))
                 library.delete(m.group(1))
                 return self._json({"ok": True})
             col = library.get(cid)
@@ -356,31 +573,32 @@ class Handler(BaseHTTPRequestHandler):
             self._err(400, str(e))
 
     # ------------------------------------------------------------------ POST
-    def do_POST(self):
+    def _do_POST(self):
         cid, path, qs = self._route()
         if cid is None:
             if path == "/collections":
-                return self._create_collection()
+                return self._create_collection(self._body())
             return self._err(404, "not found")
+        # JSON routes: Content-Type + size are enforced before anything else
+        req = None if path in _NON_JSON_POSTS else self._body()
         try:
             col = library.get(cid)
         except KeyError:
             return self._err(404, "unknown collection")
         if path == "/ask":
-            self._do_ask(cid)
+            self._do_ask(cid, req)
         elif path == "/ingest":
             self._do_ingest(col, qs)
         elif path == "/import":
             self._do_import(col)
         elif path == "/source-meta":
-            self._do_source_meta(col)
+            self._do_source_meta(col, req)
         else:
             self._err(404, "not found")
 
-    def _create_collection(self):
+    def _create_collection(self, req):
         try:
-            req = self._body()
-            if not req.get("name", "").strip():
+            if not str(req.get("name") or "").strip():
                 raise ValueError("a name is required")
             col = library.create(req["name"].strip(),
                                  link=req.get("link") or None,
@@ -392,9 +610,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._err(400, str(e))
 
-    def _do_source_meta(self, col):
+    def _do_source_meta(self, col, req):
         try:
-            req = self._body()
             years = req.get("years")
             if years and not (isinstance(years, list) and len(years) == 2):
                 raise ValueError("years must be [lo, hi]")
@@ -402,6 +619,8 @@ class Handler(BaseHTTPRequestHandler):
                                 years=years)
             runtime(col.id, reload=True)   # titles are attached at load time
             self._json({"ok": True})
+        except NOT_INDEXED:
+            self._err(409, not_indexed_msg(col.id))
         except Exception as e:
             self._err(400, str(e))
 
@@ -411,6 +630,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
+        self._streaming = True
 
     def _w(self, obj):
         self.wfile.write((json.dumps(obj) + "\n").encode())
@@ -431,8 +651,10 @@ class Handler(BaseHTTPRequestHandler):
                                       progress=self._w, workers=1)
             try:
                 runtime(col.id, reload=True)
-            except SystemExit as e:      # no chunks produced
-                self._w({"stage": "error", "status": str(e)})
+            except NOT_INDEXED:          # no chunks produced
+                self._w({"stage": "error", "error": not_indexed_msg(col.id),
+                         "status": "no passages were produced — "
+                                   + not_indexed_msg(col.id)})
                 return
             self._w({"stage": "complete", **res})
         except BrokenPipeError:
@@ -445,21 +667,23 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             _INGEST_LOCK.release()
 
-    def _do_ask(self, cid):
+    def _do_ask(self, cid, req):
+        # resolve the runtime BEFORE the stream starts, so "not indexed" is
+        # a real 409 (body is also a valid one-line NDJSON error event)
         try:
-            req = self._body()
-        except Exception as e:
-            return self._err(400, str(e))
+            rt = runtime(cid)
+        except NOT_INDEXED:
+            msg = not_indexed_msg(cid)
+            return self._json({"type": "error", "error": msg}, 409)
         self._ndjson_start()
         w = self._w
         try:
-            rt = runtime(cid)
             col = rt.col
             conv = req.get("conversation_id") or conversations.new_id()
             res = rt.ask_stream(req["question"],
                                 mode=req.get("mode", "scholar"))
             w({"type": "meta", "mode": res["mode"], "sources": res["sources"],
-               "conversation_id": conv})
+               "conversation_id": conv, "dropped": res.get("dropped", 0)})
             verify = None
             if res["stream"] is None:
                 answer = res["answer"]
@@ -493,14 +717,17 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def _do_import(self, col):
+        filename = self.headers.get("X-Filename", "upload.pdf")
+        if self.headers.get("Content-Length") is None:
+            raise RequestError(411, "Content-Length required")
+        length = self._content_length(MAX_UPLOAD)   # 413 before reading
         try:
-            filename = self.headers.get("X-Filename", "upload.pdf")
-            length = int(self.headers.get("Content-Length", 0))
-            if length > 200 * 1024 * 1024:
-                raise ValueError("File too large (200 MB max)")
             data = self.rfile.read(length)
             summary = import_work(col, filename, data)
             self._json(summary)
+        except NOT_INDEXED:
+            self._err(409, "no passages could be extracted from "
+                      f"{filename!r} — " + not_indexed_msg(col.id))
         except Exception as e:
             self._err(400, str(e))
 
@@ -508,8 +735,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def make_server(port=config.PORT):
-    return ThreadingHTTPServer((config.HOST, port), Handler)
+def make_server(port=config.PORT, token=None):
+    """Threaded server on config.HOST:port (0 = any free port). With a
+    `token`, every request must carry the per-launch session cookie, which
+    GET /?token=<token> sets (see Handler._check_access)."""
+    httpd = ThreadingHTTPServer((config.HOST, port), Handler)
+    httpd.token = token or None
+    return httpd
 
 
 if __name__ == "__main__":

@@ -77,4 +77,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import errors
+    try:
+        main()
+    except errors.NotIndexed as e:     # collection not ingested yet
+        sys.exit(str(e))

@@ -3,7 +3,7 @@ BEFORE any embedding.
 
 Reads ONLY completed chunk files (data/chunks/*.jsonl), asks the configured
 local LLM for a 4-6 sentence abstract + keywords per section, and writes
-plain-text artifacts to data/summaries/<stem>.jsonl. Stage 2 (embedding)
+plain-text artifacts to data/summaries/<artifact key>.jsonl. Stage 2 (embedding)
 may embed a summary only after it exists here. Idempotent; --force redoes.
 
   .venv/bin/python summarize.py -c <collection> [--force]
@@ -101,8 +101,9 @@ def summarize_source(col, chunk_file, force=False):
     from concurrent.futures import ThreadPoolExecutor
     import ingest
     out_dir = col.summaries_dir
-    out = out_dir / chunk_file.name
-    sidecar = out.with_suffix(".jsonl.src")
+    key = col.key_of_chunk_file(chunk_file)
+    out = out_dir / (key + ".jsonl")
+    sidecar = out_dir / (key + ".jsonl.src")
     chunk_hash = ingest.file_hash(chunk_file)
     if (out.exists() and not force and sidecar.exists()
             and sidecar.read_text().strip() == chunk_hash):
@@ -170,13 +171,13 @@ def llm_reachable():
         return False
 
 
-def _manifest_key(col, stem):
-    """Manifest entries are keyed by source FILENAME; map a chunk-file stem
-    back to it (sources may be .pdf/.md/.docx/…)."""
+def _manifest_key(col, key):
+    """Manifest entries are keyed by source FILENAME; map a chunk file's
+    artifact key back to it (sources may be .pdf/.md/.docx/…)."""
     for src in col.source_files():
-        if src.stem == stem:
+        if col.artifact_key(src.name) == key:
             return src.name
-    return stem
+    return key
 
 
 def run_all(col, force=False, manifest=None, save=None, progress=None):
@@ -187,19 +188,20 @@ def run_all(col, force=False, manifest=None, save=None, progress=None):
         return False
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for chunk_file in sorted(col.chunks_dir.glob("*.jsonl")):
+        key = col.key_of_chunk_file(chunk_file)
         try:
             n = summarize_source(col, chunk_file, force)
         except Exception as e:
-            print(f"[summarize] {chunk_file.stem}: interrupted ({e}) — "
+            print(f"[summarize] {key}: interrupted ({e}) — "
                   f"partial progress kept, will resume next run")
             continue
         status = "up to date" if n is None else f"{n} section summaries"
         if progress:
-            progress({"stage": "summarize", "source": chunk_file.stem,
+            progress({"stage": "summarize", "source": key,
                       "status": status})
-        print(f"[summarize] {chunk_file.stem}: {status}")
+        print(f"[summarize] {key}: {status}")
         if manifest is not None:
-            m = manifest.setdefault(_manifest_key(col, chunk_file.stem), {})
+            m = manifest.setdefault(_manifest_key(col, key), {})
             m["summary_status"] = status
             if n is not None:
                 m["summarized_at"] = now

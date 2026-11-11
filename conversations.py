@@ -74,9 +74,18 @@ def _md_sources(sources):
     return "\n".join(lines)
 
 
-def to_markdown(turns, title="AnyRAG conversation"):
+def persona_disclaimer(author=None):
+    """Collection-neutral label for persona-mode answers."""
+    if author:
+        return (f"AI reconstruction from the collected writings of {author} "
+                f"— not the author.")
+    return "AI reconstruction from the collected writings — not the author."
+
+
+def to_markdown(turns, title="AnyRAG conversation", author=None):
     """Readable transcript: Q/A headings, blockquotes preserved, quote-check
-    marks, source lists."""
+    marks, source lists. `author` (the collection's, optional) only names
+    whose writings a persona-mode answer was reconstructed from."""
     date = (turns[0].get("ts", "") if turns else "")[:10]
     parts = [f"# {title} — {date}", ""]
     for t in turns:
@@ -85,8 +94,7 @@ def to_markdown(turns, title="AnyRAG conversation"):
         parts.append("")
         answer = t["answer"] or ""
         if t["mode"] == "persona":
-            answer = ("*[AI reconstruction from published writings — "
-                      "not the author himself.]*\n\n") + \
+            answer = f"*[{persona_disclaimer(author)}]*\n\n" + \
                      re.sub(r"^\*\[[^\]]*\]\*\s*", "", answer)
         parts.append(answer.strip())
         if t.get("verify"):

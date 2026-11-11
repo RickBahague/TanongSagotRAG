@@ -12,11 +12,13 @@ Generation supports streaming (llm_stream / ask_stream) and blocking (ask).
 import json
 import math
 import re
+import threading
 import urllib.request
 from collections import Counter
 from pathlib import Path
 
 import config
+import errors
 
 STOPWORDS = set("""a an and are as at be but by for from has have he her his i in is it its
 of on or our that the their they this to was we were which with you your not no
@@ -47,14 +49,15 @@ def _chunk_files(col):
     return sorted(col.chunks_dir.glob("*.jsonl"))
 
 
-def _vector_file(col, stem):
-    f = col.vectors_dir / (stem + ".npz")
+def _vector_file(col, key):
+    """vectors/<artifact key>.npz, or None."""
+    f = col.vectors_dir / (key + ".npz")
     return f if f.exists() else None
 
 
-def _date_map(col, stem):
+def _date_map(col, key):
     """Per-section dates from the stage-1c sidecar (empty when absent)."""
-    f = col.dates_dir / (stem + ".json")
+    f = col.dates_dir / (key + ".json")
     if f.exists():
         try:
             return json.loads(f.read_text())
@@ -63,13 +66,16 @@ def _date_map(col, stem):
     return {}
 
 
-def dedup_ids(chunks):
-    """Truncated essay titles can collide in chunk ids (same stem, same
+def dedup_ids(chunks, seen=None):
+    """Truncated essay titles can collide in chunk ids (same id prefix, same
     40-char title prefix, same offset). Chunk FILES stay untouched (hash
     stability); ids are disambiguated deterministically at read time, in
     file order, by appending #2, #3… Used by every id consumer so the
-    reader, quote bank, and sources payload all agree."""
-    seen = {}
+    reader, quote bank, and sources payload all agree. Pass one `seen`
+    dict across files to make ids unique collection-wide (load_sources
+    does; ingest.chunk_id_prefixes already keeps sources apart, so this is
+    only a safety net)."""
+    seen = {} if seen is None else seen
     for c in chunks:
         n = seen.get(c["id"], 0) + 1
         seen[c["id"]] = n
@@ -79,15 +85,28 @@ def dedup_ids(chunks):
 
 
 def load_sources(col):
-    """Returns ordered [(stem, chunks, vector_file_or_None)] for one
+    """Returns ordered [(artifact key, chunks, vector_file_or_None)] for one
     collection. Dates and display work-titles are attached in memory only —
-    chunk files stay byte-stable."""
-    out = []
+    chunk files stay byte-stable.
+
+    Raises errors.NotIndexed when the collection has no chunks at all. A
+    chunk file holding zero chunks (e.g. a source too short or empty to
+    chunk) is skipped, not returned, so "no chunk files" and "only empty
+    chunk files" are treated the same: not indexed. CLIs turn NotIndexed
+    into an exit message; the server maps it to HTTP 409."""
+    out, seen = [], {}
     for f in _chunk_files(col):
         with open(f) as fh:
-            chunks = dedup_ids([json.loads(line) for line in fh])
-        dmap = _date_map(col, f.stem)
+            chunks = dedup_ids([json.loads(line) for line in fh
+                                if line.strip()], seen)
+        if not chunks:
+            continue
+        key = col.key_of_chunk_file(f)
+        dmap = _date_map(col, key)
         for c in chunks:
+            # para sidecar lookup by the chunk FILE's key (correct even for
+            # a not-yet-migrated schema-1 layout)
+            _PARA_KEYS[(col.id, c["source"])] = key
             c["work"] = col.work_title(c["source"])
             if c["essay"] == Path(c["source"]).stem:
                 c["essay"] = c["work"]      # untitled section → work title
@@ -95,10 +114,10 @@ def load_sources(col):
             if d:
                 c["date"] = d["date"]
                 c["date_precision"] = d["precision"]
-        out.append((f.stem, chunks, _vector_file(col, f.stem)))
+        out.append((key, chunks, _vector_file(col, key)))
     if not out:
-        raise SystemExit(f"No chunks in collection {col.id!r}. Run: "
-                         f".venv/bin/python ingest.py -c {col.id}")
+        raise errors.NotIndexed(f"No chunks in collection {col.id!r}. Run: "
+                                f".venv/bin/python ingest.py -c {col.id}")
     return out
 
 
@@ -252,7 +271,8 @@ class HybridIndex:
 # -------------------------------------- summaries-first (hierarchical) ----
 
 def load_summaries(col):
-    """All Stage-1b summary artifacts: [(stem, [entries], vec_file_or_None)]."""
+    """All Stage-1b summary artifacts:
+    [(artifact key, [entries], vec_file_or_None)]."""
     out = []
     if not col.summaries_dir.exists():
         return out
@@ -260,8 +280,9 @@ def load_summaries(col):
         entries = [json.loads(l) for l in open(f)]
         if not entries:
             continue
-        cand = col.vectors_dir / (f.stem + ".summaries.npz")
-        out.append((f.stem, entries, cand if cand.exists() else None))
+        key = col.key_of_chunk_file(f)          # summaries/<key>.jsonl
+        cand = col.vectors_dir / (key + ".summaries.npz")
+        out.append((key, entries, cand if cand.exists() else None))
     return out
 
 
@@ -448,6 +469,9 @@ def _request(url, payload):
 
 
 _EMBEDDED_LLM = None
+# One shared in-process Llama serves every server thread; llama.cpp contexts
+# are not re-entrant, so a generation holds this for its whole stream.
+_EMBEDDED_LOCK = threading.Lock()
 
 
 def _embedded_llm():
@@ -515,7 +539,8 @@ def llm_stream(system, user, temperature=None, model=None, backend=None,
         base = url.rstrip("/")
         req = _request(f"{base}/chat/completions", {
             "model": model, "messages": messages,
-            "temperature": temperature, "stream": True})
+            "temperature": temperature, "stream": True,
+            "max_tokens": config.LLM_MAX_TOKENS})
         with _open(req, model) as resp:
             for line in resp:
                 line = line.decode("utf-8", "replace").strip()
@@ -529,12 +554,26 @@ def llm_stream(system, user, temperature=None, model=None, backend=None,
                 if delta:
                     yield delta
     elif backend == "embedded":
-        llm = _embedded_llm()
-        for part in llm.create_chat_completion(
-                messages=messages, temperature=temperature, stream=True):
-            delta = part["choices"][0].get("delta", {}).get("content")
-            if delta:
-                yield delta
+        # Held for the full stream (model load included). Released in
+        # `finally`, so a generator that is closed early or garbage-collected
+        # unlocks too.
+        _EMBEDDED_LOCK.acquire()
+        try:
+            llm = _embedded_llm()
+            parts = llm.create_chat_completion(
+                messages=messages, temperature=temperature, stream=True,
+                max_tokens=config.LLM_MAX_TOKENS)
+            try:
+                for part in parts:
+                    delta = part["choices"][0].get("delta", {}).get("content")
+                    if delta:
+                        yield delta
+            finally:
+                close = getattr(parts, "close", None)
+                if close:
+                    close()
+        finally:
+            _EMBEDDED_LOCK.release()
     else:
         raise ValueError(f"Unknown LLM backend: {backend!r}")
 
@@ -638,6 +677,73 @@ def build_context(hits):
     return "\n\n---\n\n".join(parts)
 
 
+# ------------------------------------------------------------ token budget --
+# Estimated, not tokenized: words x 1.35 over every message sent. Integer
+# form (words x 135 vs. tokens x 100) avoids float edge cases at the limit.
+
+_TOK_PER_WORD_X100 = 135
+
+
+def _words(text):
+    return len(text.split())
+
+
+def user_prompt(context, question):
+    return (f"Excerpts from the documents:\n\n{context}"
+            f"\n\nQuestion: {question}")
+
+
+def _order_for_prompt(hits, question):
+    """Evolution questions present excerpts chronologically; otherwise the
+    retrieval rank order is kept."""
+    if _EVOLUTION.search(question):
+        return sorted(hits, key=lambda h: (chunk_year(h[1]) is None,
+                                           chunk_year(h[1]) or 0))
+    return list(hits)
+
+
+def fit_context(system, question, hits):
+    """Budget the prompt to the model window.
+
+    `hits` must be ranked best-first. Returns (sent_hits, user, dropped):
+    the lowest-ranked hits are removed until
+    words(system + user) x 1.35 + LLM_MAX_TOKENS <= LLM_CTX. If even the
+    best hit alone does not fit, its text is truncated (on a copy; the
+    indexed chunk is never mutated, and the copy carries "truncated": True)
+    rather than sending no excerpt. sent_hits are in presentation order
+    (chronological for evolution questions). Config is read at call time."""
+    budget_x100 = (config.LLM_CTX - config.LLM_MAX_TOKENS) * 100
+    sys_words = _words(system)
+
+    def build(kept):
+        ordered = _order_for_prompt(kept, question)
+        user = user_prompt(build_context(ordered), question)
+        ok = (sys_words + _words(user)) * _TOK_PER_WORD_X100 <= budget_x100
+        return ok, ordered, user
+
+    kept = list(hits)
+    while kept:
+        ok, ordered, user = build(kept)
+        if ok:
+            return ordered, user, len(hits) - len(kept)
+        if len(kept) == 1:
+            break
+        kept.pop()                    # lowest retrieval rank goes first
+    if not kept:
+        return [], user_prompt("", question), 0
+
+    # A single excerpt is still over budget: truncate its text to fit.
+    s, c = kept[0]
+    text_words = c["text"].split()
+    _, _, user = build(kept)
+    overhead = sys_words + _words(user) - len(text_words)
+    allowed = max(budget_x100 // _TOK_PER_WORD_X100 - overhead - 1, 0)  # "…"
+    short = dict(c, text=" ".join(text_words[:allowed] + ["…"]),
+                 truncated=True)
+    _, ordered, user = build([(s, short)])
+    return ordered, user, len(hits) - 1
+
+
 # ------------------------------------------------------------ era parsing --
 
 _ERA_PATTERNS = [
@@ -649,7 +755,6 @@ _ERA_PATTERNS = [
     (re.compile(r"\buntil\s+(\d{4})\b", re.I), lambda m: (0, int(m.group(1)))),
     (re.compile(r"\bin\s+the\s+(\d{3})0s\b", re.I),
      lambda m: (int(m.group(1)) * 10, int(m.group(1)) * 10 + 9)),
-    (re.compile(r"\bduring\s+martial\s+law\b", re.I), lambda m: (1972, 1981)),
     (re.compile(r"\b(?:in|of|from)\s+(\d{4})\b", re.I),
      lambda m: (int(m.group(1)), int(m.group(1)))),
 ]
@@ -704,17 +809,19 @@ def build_reader(chunks):
 
 
 _PARA_MAPS = {}
+_PARA_KEYS = {}        # (col.id, source filename) -> artifact key
 
 
 def _paras_for(col, chunk):
     """Display-only paragraph offsets for a chunk (from the para sidecar
     written at chunk time); [] when no map exists — reader then shows the
     passage as a single block, exactly as before."""
-    stem = Path(chunk["source"]).stem
-    key = (col.id, stem)
+    akey = (_PARA_KEYS.get((col.id, chunk["source"]))
+            or col.artifact_key(chunk["source"]))
+    key = (col.id, akey)
     if key not in _PARA_MAPS:
         m = {}
-        f = col.paras_dir / (stem + ".json")
+        f = col.paras_dir / (akey + ".json")
         if f.exists():
             try:
                 m = json.loads(f.read_text())
@@ -915,15 +1022,17 @@ def verify_quotes(answer, chunks):
 # -------------------------------------------------------------------- ask --
 
 def ask_stream(col, question, mode="scholar", index=None, k=None):
-    """Returns {"sources", "mode", "stream", "answer"}.
+    """Returns {"sources", "mode", "stream", "answer", "dropped"}.
     stream is a generator of text deltas, or None when the question is
-    gated out (then "answer" holds the fallback text)."""
+    gated out (then "answer" holds the fallback text). "sources" lists only
+    the excerpts actually sent; "dropped" counts hits removed to fit the
+    model window (config.LLM_CTX - config.LLM_MAX_TOKENS)."""
     if mode not in available_modes(col):
         mode = "scholar"
     index = index or load_index(col)
     if not gate_ok(index, question):
         return {"answer": not_covered(col), "sources": [], "mode": mode,
-                "stream": None}
+                "stream": None, "dropped": 0}
     system_fn, temp_key, k_key = MODES.get(mode, MODES["scholar"])
     system = system_fn(col)
     temperature = getattr(config, temp_key) if temp_key else None
@@ -931,10 +1040,7 @@ def ask_stream(col, question, mode="scholar", index=None, k=None):
         k = getattr(config, k_key) if k_key else config.TOP_K
     era = parse_era(question)
     pool = apply_era(index.search(question, k * config.POOL_FACTOR), era, k)
-    hits = diversify(_maybe_rerank(question, pool), k)
-    if _EVOLUTION.search(question):   # evolution question: chronological arc
-        hits.sort(key=lambda h: (chunk_year(h[1]) is None,
-                                 chunk_year(h[1]) or 0))
+    hits = diversify(_maybe_rerank(question, pool), k)   # best-first
     model = backend = burl = None
     persona = col.persona
     if mode == "persona" and persona and persona.get("model"):
@@ -942,17 +1048,20 @@ def ask_stream(col, question, mode="scholar", index=None, k=None):
         backend = persona.get("backend") or None
         burl = persona.get("url") or None
         system = system_persona_tuned(col)
-    gen = llm_stream(system, f"Excerpts from the documents:\n\n"
-                             f"{build_context(hits)}"
-                             f"\n\nQuestion: {question}",
-                     temperature=temperature, model=model,
+    # Budget against the final system prompt; drops by retrieval rank, then
+    # orders chronologically for evolution questions (see fit_context).
+    hits, user, dropped = fit_context(system, question, hits)
+    gen = llm_stream(system, user, temperature=temperature, model=model,
                      backend=backend, url=burl)
     sources = [{"id": c["id"], "essay": c["essay"], "year": chunk_year(c),
                 "page_start": c["page_start"], "page_end": c["page_end"],
                 "source": c["source"],
                 "work": c.get("work", Path(c["source"]).stem),
-                "score": round(s, 4)} for s, c in hits]
-    return {"sources": sources, "mode": mode, "stream": gen, "answer": None}
+                "score": round(s, 4),
+                **({"truncated": True} if c.get("truncated") else {})}
+               for s, c in hits]
+    return {"sources": sources, "mode": mode, "stream": gen, "answer": None,
+            "dropped": dropped}
 
 
 def ask(col, question, mode="scholar", index=None, k=None):

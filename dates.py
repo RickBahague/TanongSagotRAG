@@ -1,6 +1,6 @@
 """Pipeline stage 1c — per-article date extraction (regex, no LLM).
 
-Reads completed chunk files and writes data/dates/<stem>.json:
+Reads completed chunk files and writes data/dates/<artifact key>.json:
 
   {"_hash": <chunk-file sha256>,
    "<essay>": {"date": "1966-02-06", "precision": "day|month|year|work",
@@ -123,7 +123,8 @@ def run_all(col, force=False):
     out_dir = col.dates_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     for cf in sorted(col.chunks_dir.glob("*.jsonl")):
-        out = out_dir / (cf.stem + ".json")
+        key = col.key_of_chunk_file(cf)
+        out = out_dir / (key + ".json")
         h = ingest.file_hash(cf)
         if out.exists() and not force:
             try:
@@ -135,7 +136,7 @@ def run_all(col, force=False):
         d["_hash"] = h
         out.write_text(json.dumps(d, ensure_ascii=False))
         n = sum(1 for k in d if k != "_hash")
-        print(f"[dates] {cf.stem[:44]}: {n} sections dated")
+        print(f"[dates] {key[:44]}: {n} sections dated")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,9 @@
 
 Chunking is always completed for a source before any embedding of it.
 data/manifest.json records pipeline state per source; unchanged sources are
-skipped (content-hash staleness for vectors/summaries, mtime for chunks).
+skipped (content-hash staleness everywhere: the manifest stores each
+source's sha256 + chunk params for stage 1; vectors/summaries hash their
+inputs). Derived data of sources that disappeared is pruned first.
 
   .venv/bin/python ingest.py --collection <id> [--force] [--no-summaries]
 
@@ -27,7 +29,9 @@ manifest per source:
 single-section.
 """
 import argparse
+import hashlib
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -39,15 +43,163 @@ import library
 
 # ---------------------------------------------------------------- manifest --
 
-def load_manifest(col):
+MANIFEST_SCHEMA = 2
+# manifest.json = {source_filename: entry, ...} plus reserved keys starting
+# with "_" (e.g. "_schema"), which are never source names. Entries stay keyed
+# by source FILENAME in every schema; 2 = written alongside the schema-2
+# (full-filename) artifact layout, entries may carry "id_prefix".
+
+
+def load_manifest_raw(col):
+    """The manifest file as stored, reserved "_" keys included."""
     if col.manifest_file.exists():
         return json.loads(col.manifest_file.read_text())
     return {}
 
 
+def load_manifest(col):
+    """{source_filename: entry} — reserved "_" keys are stripped, so callers
+    can iterate it as a pure per-source map."""
+    return {k: v for k, v in load_manifest_raw(col).items()
+            if not k.startswith("_")}
+
+
 def save_manifest(col, m):
-    col.data_dir.mkdir(parents=True, exist_ok=True)
-    col.manifest_file.write_text(json.dumps(m, indent=2))
+    """Atomic write; reserved keys are (re)added here, so a dict from
+    load_manifest round-trips safely."""
+    out = {"_schema": MANIFEST_SCHEMA}
+    out.update({k: v for k, v in m.items() if not k.startswith("_")})
+    library.write_json_atomic(col.manifest_file, out, indent=2)
+
+
+def prune_removed(col, sources, manifest, emit):
+    """Delete derived artifacts and manifest entries of sources that are no
+    longer in the collection. Only files inside col.data_dir whose name
+    parses (library.DERIVED_FILES) to an artifact key with no live source are
+    touched — never the sources folder, conversations/, or eval.jsonl.
+    Mutates `manifest`; emits one {stage: "prune"} event per pruned source.
+    Returns the list of pruned names."""
+    live = {s.name for s in sources}
+    live_keys = {col.artifact_key(s.name) for s in sources}
+    data_root = col.data_dir.resolve()
+    gone = {}                                  # artifact key -> [paths]
+    for p, keys in col.derived_files_on_disk().items():
+        if keys & live_keys:
+            continue
+        if data_root not in p.resolve().parents:
+            continue
+        gone.setdefault(sorted(keys)[0], []).append(p)
+    # manifest entries for vanished sources, matched to their artifact key
+    stale_names = [n for n in manifest if n not in live]
+    names_by_key = {}
+    for n in stale_names:
+        names_by_key.setdefault(col.artifact_key(n), []).append(n)
+    pruned = []
+    for key in sorted(set(gone) | set(names_by_key)):
+        removed = 0
+        for p in gone.get(key, []):
+            try:
+                p.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+        for n in names_by_key.get(key, []):
+            manifest.pop(n, None)
+        label = ", ".join(names_by_key.get(key, [])) or key
+        emit(stage="prune", source=label,
+             status=f"source removed — deleted {removed} derived file(s)",
+             removed=removed)
+        pruned.append(label)
+    return pruned
+
+
+# ------------------------------------------------- schema-2 layout migration --
+
+def _old_stem_key(name):
+    """Schema-1 artifact key of a source: its stem. Used ONLY to recognise
+    files written by the old layout during migration."""
+    return Path(name).stem
+
+
+def migrate_layout(col, sources=None, emit=None):
+    """Re-key a schema-1 collection (derived files named after the source
+    STEM) to the schema-2 layout (Collection.artifact_key = full filename)
+    by RENAMING files — chunk/paras/dates/quotes/summary/vector bytes are
+    untouched, so nothing is re-chunked, re-embedded or re-summarized:
+    every staleness hash in those files (vectors' src_hash, summaries'
+    .src sidecar, dates/quotes "_hash") is a hash of file CONTENT (chunk or
+    summary file bytes), never of a file name, and the manifest is keyed by
+    source filename, which does not change.
+
+    Per old stem-keyed file:
+      - exactly one current source has that stem → renamed to its new key
+        (if the new-key file already exists, the new one wins and the old
+        file is deleted);
+      - several current sources share the stem → the file is ambiguous
+        (whichever source wrote last overwrote the other) → deleted, so
+        each source is rebuilt from scratch by the following stages;
+      - no current source has it → left alone (prune_removed handles it).
+    A file whose name already parses to a current schema-2 key is kept as
+    is. Only files inside col.data_dir are touched — never the sources
+    folder, conversations/ or eval.jsonl. Afterwards collection.json gets
+    "schema": COLLECTION_SCHEMA (and the manifest "_schema" is bumped).
+    Idempotent: a schema >= 2 collection returns at once.
+    Returns {"renamed": n, "deleted": n} or None when nothing was to do."""
+    if (col.meta.get("schema") or 1) >= 2:
+        return None
+    if not col.sources_dir.is_dir():
+        return None            # unmounted linked folder: cannot attribute
+    emit = emit or (lambda **ev: None)
+    sources = col.source_files() if sources is None else sources
+    by_stem = {}
+    for s in sources:
+        by_stem.setdefault(_old_stem_key(s.name), []).append(s.name)
+    new_keys = {col.artifact_key(s.name) for s in sources}
+    data_root = col.data_dir.resolve()
+    renamed = deleted = 0
+    ambiguous = set()
+    for d in dict.fromkeys(d for d, _ in library.DERIVED_FILES):
+        folder = getattr(col, d)
+        if not folder.is_dir():
+            continue
+        suffixes = [sx for dd, sx in library.DERIVED_FILES if dd == d]
+        for p in sorted(folder.iterdir()):
+            if not p.is_file() or data_root not in p.resolve().parents:
+                continue
+            if any(p.name.endswith(sx) and p.name[:-len(sx)] in new_keys
+                   for sx in suffixes):
+                continue       # already schema-2 named
+            # parse as the old writer named it: the first (longest) suffix
+            # of this dir in DERIVED_FILES that matches
+            suf = next((sx for sx in suffixes if p.name.endswith(sx)
+                        and len(p.name) > len(sx)), None)
+            if suf is None:
+                continue
+            old_key = p.name[:-len(suf)]
+            owners = by_stem.get(old_key, [])
+            if len(owners) == 1:
+                target = folder / (col.artifact_key(owners[0]) + suf)
+                if target.exists():
+                    p.unlink()
+                    deleted += 1
+                else:
+                    os.replace(p, target)
+                    renamed += 1
+            elif len(owners) > 1:
+                p.unlink()
+                deleted += 1
+                ambiguous.add(old_key)
+    col.meta["schema"] = library.COLLECTION_SCHEMA
+    col.save()
+    if col.manifest_file.exists():
+        save_manifest(col, load_manifest(col))
+    emit(stage="migrate", source="",
+         status=f"re-keyed derived files to schema {library.COLLECTION_SCHEMA}:"
+                f" {renamed} renamed, {deleted} deleted"
+                + (f" (ambiguous stems: {', '.join(sorted(ambiguous))})"
+                   if ambiguous else ""),
+         renamed=renamed, deleted=deleted)
+    return {"renamed": renamed, "deleted": deleted}
 
 
 # ------------------------------------------------------- stage 1: chunking --
@@ -78,6 +230,32 @@ def essay_for_page(toc, printed_page):
         else:
             break
     return current
+
+
+def _section_index(starts, page):
+    """Index of the section containing `page` given ordered section start
+    pages (same walk as essay_for_page), or -1 before the first section."""
+    j = -1
+    for k, start in enumerate(starts):
+        if page >= start:
+            j = k
+        else:
+            break
+    return j
+
+
+def _unique_titles(titles_seen, title):
+    """Distinct display title for a repeated section title within one
+    source: first 'X', then 'X (2)', 'X (3)', … (`titles_seen` is a set the
+    caller keeps per source)."""
+    if title not in titles_seen:
+        titles_seen.add(title)
+        return title
+    n = 2
+    while f"{title} ({n})" in titles_seen:
+        n += 1
+    titles_seen.add(f"{title} ({n})")
+    return f"{title} ({n})"
 
 
 def clean_page(text, printed_page, book_title):
@@ -300,15 +478,18 @@ def sections_from_pdf(col, path, meta):
         offset, title = meta.get("page_offset", 0), meta.get("title", work)
 
         def gen_meta():
+            # keyed by TOC entry index, not title: two TOC entries with the
+            # same title stay two sections (chunk_source suffixes " (2)")
             sections = {}
             for i in range(offset + 1, len(reader.pages)):
                 printed = i - offset
                 raw = reader.pages[i].extract_text() or ""
                 if raw.strip():
-                    essay = essay_for_page(toc, printed)
-                    sections.setdefault(essay, []).append(
+                    j = _section_index([s for _, s in toc], printed)
+                    essay = toc[j][0] if j >= 0 else "Front matter"
+                    sections.setdefault(j, (essay, []))[1].append(
                         (printed, clean_page(raw, printed, title)))
-            yield from sections.items()
+            yield from sections.values()
         return "meta", gen_meta()
 
     bounds = _outline_sections(reader)
@@ -321,20 +502,19 @@ def sections_from_pdf(col, path, meta):
         def gen_auto():
             sections = {}
             offset = bounds[0][2]
+            starts = [s for _, s, _ in bounds]
             for i in range(len(reader.pages)):
                 raw = reader.pages[i].extract_text() or ""
                 if not raw.strip():
                     continue
-                title = work              # front matter before first section
-                for t, start, _ in bounds:
-                    if i >= start:
-                        title = t
-                    else:
-                        break
+                # keyed by bound index, not title (duplicate titles stay
+                # distinct); -1 = front matter before the first section
+                j = _section_index(starts, i)
+                title = bounds[j][0] if j >= 0 else work
                 label = i - offset if (offset is not None and i > offset) else i + 1
-                sections.setdefault(title, []).append(
+                sections.setdefault(j, (title, []))[1].append(
                     (label, clean_page(raw, label, work)))
-            yield from sections.items()
+            yield from sections.values()
         return rung, gen_auto()
 
     # last resort: one section, pdf page numbers
@@ -469,30 +649,125 @@ def extract_sections(col, path):
     return sections_from_text(path)
 
 
-def chunk_source(col, path, force=False):
+MIN_CHUNK_WORDS = 40
+
+
+def chunk_params(col):
+    """Effective chunking settings for a collection — stored in the manifest
+    so a settings change re-chunks."""
+    return {"chunk_words": col.setting("CHUNK_WORDS", config.CHUNK_WORDS),
+            "overlap_words": col.setting("CHUNK_OVERLAP_WORDS",
+                                         config.CHUNK_OVERLAP_WORDS)}
+
+
+ID_PREFIX_LEN = 30
+
+
+def chunk_id_prefixes(names):
+    """{source filename: chunk-id prefix} for every source of a collection.
+
+    Chunk ids are f"{prefix}-{section title[:40]}-{word offset}". The
+    prefix is the source stem cut to ID_PREFIX_LEN — UNCHANGED from schema
+    1, so ids (and saved conversations, quote banks, vectors) of existing
+    collections stay valid — unless that cut stem is shared with another
+    source of the collection (report.md + report.txt, or two long names
+    equal in their first 30 characters). Then every source of the group
+    gets the cut stem + its own suffix ("report.md", "report.txt"), and if
+    that is still not unique (or clashes with another source's prefix),
+    "~" + sha1(filename)[:8] on top. Pure function of the set of names."""
+    names = sorted(set(names))
+    base = {n: Path(n).stem[:ID_PREFIX_LEN] for n in names}
+    counts = {}
+    for b in base.values():
+        counts[b] = counts.get(b, 0) + 1
+    out = {n: (base[n] if counts[base[n]] == 1
+               else base[n] + Path(n).suffix) for n in names}
+    taken = {}
+    for n in names:
+        taken.setdefault(out[n], []).append(n)
+    for p, group in taken.items():
+        if len(group) > 1:
+            for n in group:            # a plain (non-colliding) prefix
+                if out[n] != base[n]:      # is never changed
+                    out[n] = f"{p}~" + hashlib.sha1(
+                        n.encode("utf-8")).hexdigest()[:8]
+    return out
+
+
+def chunk_id_prefix(col, path):
+    """Chunk-id prefix of one source given the collection's current
+    sources (see chunk_id_prefixes)."""
+    names = {s.name for s in col.source_files()} | {path.name}
+    return chunk_id_prefixes(names)[path.name]
+
+
+def chunk_is_current(col, path, prev, src_sha256=None, params=None,
+                     id_prefix=None):
+    """Content-hash staleness for stage 1: chunk + paras files exist and the
+    manifest entry `prev` records this exact source sha256, the current
+    chunk params and the current chunk-id prefix (entries written before
+    the prefix was recorded used the cut stem). mtimes are never consulted."""
+    if not (col.chunk_file(path.name).exists()
+            and (col.paras_dir / (col.artifact_key(path.name)
+                                  + ".json")).exists()):
+        return False
+    if not prev:
+        return False
+    sha = src_sha256 or file_hash(path)
+    if id_prefix is None:
+        id_prefix = chunk_id_prefix(col, path)
+    return (prev.get("src_sha256") == sha
+            and prev.get("chunk_params") == (params or chunk_params(col))
+            and prev.get("id_prefix", path.stem[:ID_PREFIX_LEN]) == id_prefix)
+
+
+def chunk_source(col, path, force=False, *, prev=None, src_sha256=None,
+                 id_prefix=None):
     """Stage 1 for one source. Also emits a paragraph-map sidecar
-    (data/paras/<stem>.json: chunk_id -> in-chunk word offsets starting a
+    (data/paras/<key>.json: chunk_id -> in-chunk word offsets starting a
     paragraph) used only for display; chunk bytes are unaffected.
-    Returns (chunk_file, n_chunks, segmentation_rung) or None if skipped."""
-    out = col.chunks_dir / (path.stem + ".jsonl")
-    para_out = col.paras_dir / (path.stem + ".json")
-    if (out.exists() and para_out.exists() and not force
-            and out.stat().st_mtime >= path.stat().st_mtime):
+
+    Skipped (returns None) only when not `force` and `prev` — the source's
+    manifest entry, passed in because the manifest is owned by the parent
+    process — records the same source sha256 and chunk params
+    (see chunk_is_current). Without `prev` it always chunks. `id_prefix`
+    (chunk_id_prefixes) is computed from the collection's sources when not
+    given. Returns (chunk_file, n_chunks, segmentation_rung) or None if
+    skipped."""
+    key = col.artifact_key(path.name)
+    out = col.chunks_dir / (key + ".jsonl")
+    para_out = col.paras_dir / (key + ".json")
+    if id_prefix is None:
+        id_prefix = chunk_id_prefix(col, path)
+    if not force and chunk_is_current(col, path, prev, src_sha256,
+                                      id_prefix=id_prefix):
         return None
     rung, sections = extract_sections(col, path)
 
     col.chunks_dir.mkdir(parents=True, exist_ok=True)
     col.paras_dir.mkdir(parents=True, exist_ok=True)
     n, para_map = 0, {}
-    chunk_w = col.setting("CHUNK_WORDS", config.CHUNK_WORDS)
-    overlap_w = col.setting("CHUNK_OVERLAP_WORDS", config.CHUNK_OVERLAP_WORDS)
+    params = chunk_params(col)
+    chunk_w, overlap_w = params["chunk_words"], params["overlap_words"]
+    seen_titles = set()
     with open(out, "w") as f:
-        for title, pages in sections:
+        for raw_title, pages in sections:
+            # repeated titles within a source stay distinct: 'X', 'X (2)', …
+            title = _unique_titles(seen_titles, raw_title)
+            tid = raw_title[:40] + title[len(raw_title):]
             words, word_pages, paras = words_with_paras(pages)
+            prev_end = 0               # end offset of the last kept window
             for start, ck in chunk_words(words, chunk_w, overlap_w):
-                if len(ck) < 40:
+                if not ck:
                     continue
-                cid = f"{path.stem[:30]}-{title[:40]}-{start}"
+                # a short window is kept unless every word in it is already
+                # in the previous chunk: the first window of a section is
+                # always kept, and no word of a section is ever lost
+                if (len(ck) < MIN_CHUNK_WORDS and start > 0
+                        and start + len(ck) <= prev_end):
+                    continue
+                prev_end = start + len(ck)
+                cid = f"{id_prefix}-{tid}-{start}"
                 f.write(json.dumps({
                     "id": cid,
                     "text": " ".join(ck),
@@ -578,15 +853,16 @@ def embed_source(col, chunk_file, force=False, shared=None):
     parts, todo = [], []
     shared = shared if shared is not None else {}
 
-    out = col.vectors_dir / (chunk_file.stem + ".npz")
+    key = col.key_of_chunk_file(chunk_file)
+    out = col.vectors_dir / (key + ".npz")
     chunks = [json.loads(l) for l in open(chunk_file)]
     if force or vectors_stale(out, chunk_file, len(chunks)):
         todo.append(([c["text"] for c in chunks], out, chunk_file,
                      f"{len(chunks)} chunks"))
 
-    summ_file = col.summaries_dir / chunk_file.name
+    summ_file = col.summaries_dir / (key + ".jsonl")
     if summ_file.exists():                      # summaries must pre-exist as text
-        sout = col.vectors_dir / (chunk_file.stem + ".summaries.npz")
+        sout = col.vectors_dir / (key + ".summaries.npz")
         summs = [json.loads(l) for l in open(summ_file)]
         if summs and (force or vectors_stale(sout, summ_file, len(summs))):
             todo.append(([f"{s['essay']}. {s['summary']} {s['keywords']}"
@@ -618,6 +894,16 @@ def embed_source(col, chunk_file, force=False, shared=None):
 
 # --------------------------------------------------------------- pipeline --
 
+def record_chunked(entry, res, now, src_sha256, params, id_prefix):
+    """Update one manifest entry after chunk_source returned `res`, so the
+    next run sees the source as current (chunk_is_current)."""
+    _, n, rung = res
+    entry.update({"chunked_at": now, "n_chunks": n, "segmentation": rung,
+                  "src_sha256": src_sha256, "chunk_params": params,
+                  "id_prefix": id_prefix})
+    entry.pop("error", None)
+
+
 def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
     """The whole pipeline for one collection. `progress` is an optional
     callable receiving {stage, source, status, i, total, …} events (the
@@ -632,28 +918,50 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
             print(f"[{ev['stage']}] {src}: {ev.get('status', '')}")
 
     col.ensure_dirs()
+    if not col.sources_dir.is_dir():
+        # e.g. a linked folder on an unmounted drive: never prune on this
+        emit(stage="error", status=f"source folder not found: "
+             f"{col.sources_dir}")
+        return {"chunks": 0, "sources": 0}
     sources = col.source_files()
+    # schema-1 (stem-keyed) layout → rename to full-filename keys BEFORE the
+    # prune, which would otherwise see the old names as orphans
+    migrate_layout(col, sources, emit)
+    manifest = load_manifest(col)
+
+    # Prune derived data of sources that no longer exist, BEFORE any stage
+    # (dates/quotes/summaries/retrieval all glob the chunks dir)
+    if prune_removed(col, sources, manifest, emit):
+        save_manifest(col, manifest)
+
     if not sources:
         emit(stage="error", status=f"no supported documents in "
              f"{col.sources_dir}")
         return {"chunks": 0, "sources": 0}
 
-    manifest = load_manifest(col)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Stage 1 — chunk every new/changed source FIRST. Sources are
     # independent; a process pool when we may fork, else serial.
-    import os
+    # Staleness = source sha256 + chunk params + chunk-id prefix, recorded
+    # in the manifest.
     if workers is None:
         workers = config.INGEST_WORKERS or max((os.cpu_count() or 2) // 2, 1)
     jobs = list(sources)
+    params = chunk_params(col)
+    shas = {src.name: file_hash(src) for src in jobs}
+    prefixes = chunk_id_prefixes(src.name for src in jobs)
+
+    def job_kw(src):
+        return {"prev": manifest.get(src.name), "src_sha256": shas[src.name],
+                "id_prefix": prefixes[src.name]}
 
     def record(src, res):
         entry = manifest.setdefault(src.name, {})
         if res:
             _, n, rung = res
-            entry.update({"chunked_at": now, "n_chunks": n,
-                          "segmentation": rung})
+            record_chunked(entry, res, now, shas[src.name], params,
+                           prefixes[src.name])
             emit(stage="chunk", source=src.name, status=f"{n} chunks "
                  f"(segmentation: {rung})", n=n, total=len(jobs))
         else:
@@ -664,14 +972,15 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
     if workers > 1 and len(jobs) > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
         with ProcessPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
-            futures = {pool.submit(chunk_source, col, src, force): src
+            futures = {pool.submit(chunk_source, col, src, force,
+                                   **job_kw(src)): src
                        for src in jobs}
             for fut in as_completed(futures):
                 record(futures[fut], fut.result())
     else:
         for src in jobs:
             try:
-                record(src, chunk_source(col, src, force))
+                record(src, chunk_source(col, src, force, **job_kw(src)))
             except Exception as e:
                 emit(stage="chunk", source=src.name, status=f"FAILED: {e}")
                 manifest.setdefault(src.name, {})["error"] = str(e)
@@ -706,7 +1015,7 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
     # Stage 2 — embed only sources whose chunking is complete
     shared = {}          # one embedding model for the whole run
     for src in sources:
-        chunk_file = col.chunks_dir / (src.stem + ".jsonl")
+        chunk_file = col.chunk_file(src.name)
         if not chunk_file.exists():
             emit(stage="embed", source=src.name, status="NOT chunked, skipping")
             continue

@@ -31,7 +31,6 @@ def _sources(col):
 
 # ------------------------------------------------------------- M1-A ingest
 
-@xfail("P0-4", "derived data for deleted sources is never pruned")
 def test_prune_removed_source(make_collection):
     col = make_collection(files=("volcanoes.txt", "beekeeping.md"))
     (col.sources_dir / "volcanoes.txt").unlink()
@@ -42,7 +41,6 @@ def test_prune_removed_source(make_collection):
     assert "volcanoes.txt" not in load_manifest(col)
 
 
-@xfail("P0-5", "derived files keyed by stem: report.md/report.txt collide")
 def test_same_stem_sources_both_indexed(make_collection):
     col = make_collection(files=("report.md", "report.txt"))
     assert _sources(col) == {"report.md", "report.txt"}
@@ -50,14 +48,12 @@ def test_same_stem_sources_both_indexed(make_collection):
     assert "sourdough" in text and "derailleur" in text
 
 
-@xfail("P0-9", "sections under 40 words produce no chunk")
 def test_short_document_is_chunked(make_collection):
     col = make_collection(files=("tiny.txt",))
     chunks = rag.load_chunks(col)
     assert len(chunks) == 1 and "ferns" in chunks[0]["text"].lower()
 
 
-@xfail("P0-9", "a trailing window < 40 words is dropped when overlap < 40")
 def test_chunk_tail_not_dropped(make_collection):
     col = make_collection(files=("volcanoes.txt",),
                           settings={"CHUNK_WORDS": 40,
@@ -67,7 +63,6 @@ def test_chunk_tail_not_dropped(make_collection):
     assert " ".join(last_words) in text
 
 
-@xfail("P0-9", "repeated section titles in one PDF are merged into one")
 def test_duplicate_section_titles_kept(make_collection):
     col = make_collection(files=("astronomy.pdf",))
     chunks = rag.load_chunks(col)
@@ -76,7 +71,6 @@ def test_duplicate_section_titles_kept(make_collection):
     assert not any(c["page_start"] == 1 and c["page_end"] == 3 for c in chunks)
 
 
-@xfail("P0-9", "chunk staleness uses mtime, not content hash")
 def test_rechunk_on_content_change_not_mtime(make_collection):
     col = make_collection(files=("volcanoes.txt",))
     src = col.sources_dir / "volcanoes.txt"
@@ -93,7 +87,6 @@ def test_rechunk_on_content_change_not_mtime(make_collection):
     assert "lava lakes" in rag.load_chunks(library.get(col.id))[0]["text"].lower()
 
 
-@xfail("P0-9", "registry/collection/manifest JSON written non-atomically")
 def test_json_writes_atomic(make_collection, monkeypatch):
     replaced = []
     real = os.replace
@@ -109,7 +102,6 @@ def test_json_writes_atomic(make_collection, monkeypatch):
 
 # ------------------------------------------------------------- M1-B server
 
-@xfail("P0-8", "un-ingested collection raises SystemExit in the handler")
 @pytest.mark.filterwarnings(
     "ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_unindexed_collection_returns_409(server):
@@ -118,7 +110,6 @@ def test_unindexed_collection_returns_409(server):
     assert st == 409 and "error" in body
 
 
-@xfail("P0-9", "runtime cache evicts in insertion order, not LRU")
 def test_runtime_cache_is_lru(make_collection):
     import serve
     ids = [make_collection(n, files=("volcanoes.txt",)).id
@@ -130,14 +121,12 @@ def test_runtime_cache_is_lru(make_collection):
     assert ids[0] in serve._RUNTIMES and ids[1] not in serve._RUNTIMES
 
 
-@xfail("P1-3", "server accepts any Host header (DNS rebinding)")
 def test_foreign_host_rejected(server):
     st, _ = server.request("GET", "/collections",
                            headers={"Host": "evil.example"})
     assert st == 403
 
 
-@xfail("P1-3", "server accepts cross-origin POSTs")
 def test_foreign_origin_rejected(server):
     st, _ = server.json("POST", "/collections", {"name": "Pwned"},
                         headers={"Origin": "http://evil.example"})
@@ -145,7 +134,6 @@ def test_foreign_origin_rejected(server):
     assert library.list_all() == []
 
 
-@xfail("P1-3", "JSON routes accept text/plain (CSRF 'simple request')")
 def test_post_requires_json_content_type(server):
     st, _ = server.request("POST", "/collections",
                            json.dumps({"name": "Simple"}).encode(),
@@ -154,7 +142,6 @@ def test_post_requires_json_content_type(server):
     assert library.list_all() == []
 
 
-@xfail("P1-3", "_body() reads any Content-Length")
 def test_oversized_body_rejected(server):
     """Contract: JSON bodies above 10 MB are refused with 413 before the
     body is read (the test only sends 1 KB of a declared 64 MB)."""
@@ -177,7 +164,6 @@ def test_oversized_body_rejected(server):
     ("conversations.py", r"author himself"),
     ("scripts/export_onnx.py", r"land reform|national democracy"),
 ])
-@xfail("P0-9", "corpus-specific strings carried over from AskJ")
 def test_no_askj_leftovers(path, pattern):
     assert not re.search(pattern, (REPO / path).read_text(), re.I)
 
@@ -197,7 +183,6 @@ def _all_chunks_index(col):
     return Everything()
 
 
-@xfail("P0-6", "no token budget: excerpts can exceed LLM_CTX")
 def test_context_fits_budget(make_collection, fake_llm, monkeypatch):
     col = make_collection()
     monkeypatch.setattr(config, "LLM_CTX", 900)
@@ -211,7 +196,6 @@ def test_context_fits_budget(make_collection, fake_llm, monkeypatch):
     assert res.get("dropped", 0) > 0
 
 
-@xfail("P0-6", "LLM_MAX_TOKENS is only sent to Ollama")
 def test_max_tokens_sent_openai(make_collection, fake_llm):
     col = make_collection(files=("beekeeping.md",))
     res = rag.ask_stream(col, "How do worker bees build the wax comb?")
@@ -219,7 +203,6 @@ def test_max_tokens_sent_openai(make_collection, fake_llm):
     assert fake_llm.last.get("max_tokens") == config.LLM_MAX_TOKENS
 
 
-@xfail("P0-7", "shared embedded Llama is used by concurrent threads")
 def test_embedded_generation_serialized(monkeypatch):
     state = {"active": 0, "max": 0}
     lock = threading.Lock()
@@ -258,7 +241,7 @@ def test_embed_stage_uses_onnx_encoder(make_collection):
         pytest.skip("ONNX encoder not present (scripts/export_onnx.py)")
     pytest.importorskip("onnxruntime")
     col = make_collection(files=("volcanoes.txt",))
-    vec = col.vectors_dir / "volcanoes.npz"
+    vec = col.vectors_dir / "volcanoes.txt.npz"
     assert vec.exists()
     import numpy as np
     assert str(np.load(vec)["model"]) == config.EMBED_MODEL

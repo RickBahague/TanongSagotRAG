@@ -38,7 +38,7 @@ def main():
 
     # verify the encoder loads and, if possible, matches sentence-transformers
     from rag import OnnxEncoder
-    texts = ["land reform and national democracy"]
+    texts = ["How do glaciers carve valleys over thousands of years?"]
     a = OnnxEncoder(OUT).encode(texts)[0]
     print(f"OnnxEncoder OK (dim={len(a)})")
     try:

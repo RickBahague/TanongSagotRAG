@@ -4,7 +4,7 @@ Scores 1-3 sentence windows from every chunk for self-containedness and
 aphoristic quality; keeps the best few per article. Every entry's text is a
 VERBATIM substring of its chunk, so quotes are verifiable by construction.
 
-Output: data/quotes/<stem>.jsonl  {text, chunk_id, essay, source, page, score}
+Output: data/quotes/<artifact key>.jsonl  {text, chunk_id, essay, source, page, score}
 with the usual hash-idempotence ("_hash" line first).
 
   .venv/bin/python quotes_bank.py -c <collection> [--force]  (also in ingest)
@@ -113,7 +113,8 @@ def run_all(col, force=False):
     out_dir = col.quotes_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     for cf in sorted(col.chunks_dir.glob("*.jsonl")):
-        out = out_dir / cf.name
+        key = col.key_of_chunk_file(cf)
+        out = out_dir / (key + ".jsonl")
         h = ingest.file_hash(cf)
         if out.exists() and not force:
             try:
@@ -127,7 +128,7 @@ def run_all(col, force=False):
             f.write(json.dumps({"_hash": h}) + "\n")
             for e in entries:
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
-        print(f"[quotes] {cf.stem[:44]}: {len(entries)} quotable passages")
+        print(f"[quotes] {key[:44]}: {len(entries)} quotable passages")
 
 
 if __name__ == "__main__":

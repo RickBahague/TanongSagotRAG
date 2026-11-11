@@ -23,8 +23,11 @@ Source modes: "managed" (files live in sources/) or "linked" (collection.json
 has "link": an absolute path to the user's own folder; derived data still
 lives under the collection, so the linked folder is never written to).
 """
+import hashlib
 import json
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -35,7 +38,74 @@ COLLECTIONS_DIR = config.USER_ROOT / "collections"
 
 SUPPORTED_SUFFIXES = (".pdf", ".txt", ".md", ".docx", ".html", ".htm")
 
+# "schema" in collection.json. 1 (or absent) = derived files keyed by source
+# STEM (same-stem sources collided); 2 = keyed by artifact_key(full filename).
+# ingest.migrate_layout() re-keys a schema-1 collection by renaming files.
+COLLECTION_SCHEMA = 2
+
 _YEARS_RX = re.compile(r"\b(19[0-9]{2}|20[0-9]{2})\b")
+
+# Every derived artifact of one source: (Collection dir property, suffix
+# appended to the source's artifact key). Longer suffixes first within a dir
+# so parsing a filename back to its key strips ".summaries.npz" before ".npz".
+DERIVED_FILES = (
+    ("chunks_dir", ".jsonl"),
+    ("paras_dir", ".json"),
+    ("dates_dir", ".json"),
+    ("quotes_dir", ".jsonl"),
+    ("summaries_dir", ".jsonl.src"),
+    ("summaries_dir", ".jsonl"),
+    ("vectors_dir", ".summaries.npz"),
+    ("vectors_dir", ".npz"),
+)
+
+# characters never kept in an artifact key: path separators, NUL/control
+# chars, and the ones Windows/SMB volumes reject
+_KEY_UNSAFE = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
+_KEY_MAX_BYTES = 160          # + longest suffix (".summaries.npz") << 255
+
+
+def artifact_key_for(filename):
+    """Artifact key of a source filename (see Collection.artifact_key).
+
+    Format: the FULL file name, verbatim ("report.md" -> "report.md", so
+    chunks/report.md.jsonl, vectors/report.md.npz …) whenever it is already
+    a safe file name: no path separator, control char or <>:"|?*, no
+    leading ".", at most _KEY_MAX_BYTES UTF-8 bytes. Otherwise the unsafe
+    characters become "_", the name is cut to fit, and "~" + the first 10
+    hex digits of sha1(filename) are appended — so two names that sanitize
+    to the same text still get different keys. Pure function of the
+    filename: stable across runs and unique per filename in a folder."""
+    name = Path(filename).name
+    safe = _KEY_UNSAFE.sub("_", name)
+    if (safe == name and not name.startswith(".")
+            and len(name.encode("utf-8")) <= _KEY_MAX_BYTES):
+        return name
+    cut = safe.encode("utf-8")[:_KEY_MAX_BYTES - 11].decode("utf-8", "ignore")
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
+    return f"{cut.lstrip('.') or '_'}~{digest}"
+
+
+def write_json_atomic(path, obj, **dumps_kw):
+    """Write `obj` as JSON to `path` atomically: temp file in the same
+    directory, fsync, then os.replace — a crash never leaves a torn file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(obj, **dumps_kw)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 class Collection:
@@ -131,6 +201,56 @@ class Collection:
                       if p.suffix.lower() in SUPPORTED_SUFFIXES
                       and not p.name.startswith("."))
 
+    # ------------------------------------------------------ derived artifacts
+    def artifact_key(self, filename):
+        """Key naming every derived file of a source (chunks/<key>.jsonl …).
+        THE one place that maps a source filename to its artifact key: the
+        full, sanitized file name (artifact_key_for). Collection schema 2."""
+        return artifact_key_for(filename)
+
+    def chunk_file(self, filename):
+        """data/chunks/<key>.jsonl of one source."""
+        return self.chunks_dir / (self.artifact_key(filename) + ".jsonl")
+
+    @staticmethod
+    def key_of_chunk_file(path):
+        """Artifact key of a chunk file (its name minus ".jsonl"). Every
+        sidecar of a chunk file is found through this key, never through
+        Path.stem, which would cut at the key's own last dot."""
+        name = Path(path).name
+        return name[:-len(".jsonl")] if name.endswith(".jsonl") else name
+
+    def derived_paths(self, filename):
+        """Every derived file that may exist for one source (all inside
+        data_dir). Conversations and eval.jsonl are never included."""
+        key = self.artifact_key(filename)
+        return [getattr(self, d) / (key + suf) for d, suf in DERIVED_FILES]
+
+    def derived_keys_of(self, path):
+        """All artifact keys a derived file name could belong to (a name
+        can parse more than one way, e.g. 'x.summaries.npz')."""
+        path = Path(path)
+        keys = set()
+        for d, suf in DERIVED_FILES:
+            if path.parent == getattr(self, d) and path.name.endswith(suf) \
+                    and len(path.name) > len(suf):
+                keys.add(path.name[:-len(suf)])
+        return keys
+
+    def derived_files_on_disk(self):
+        """Existing files in the derived-artifact dirs, as {path: keys}."""
+        out = {}
+        for d in dict.fromkeys(d for d, _ in DERIVED_FILES):
+            folder = getattr(self, d)
+            if not folder.is_dir():
+                continue
+            for p in folder.iterdir():
+                if p.is_file():
+                    keys = self.derived_keys_of(p)
+                    if keys:
+                        out[p] = keys
+        return out
+
     @property
     def source_meta(self):
         return self.meta.setdefault("source_meta", {})
@@ -178,8 +298,8 @@ class Collection:
     # -------------------------------------------------------------- persist
     def save(self):
         self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "collection.json").write_text(
-            json.dumps(self.meta, ensure_ascii=False, indent=2))
+        write_json_atomic(self.root / "collection.json", self.meta,
+                          ensure_ascii=False, indent=2)
 
     def ensure_dirs(self):
         for d in (self.chunks_dir, self.paras_dir, self.dates_dir,
@@ -211,8 +331,7 @@ def _registry():
 
 
 def _save_registry(entries):
-    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    REGISTRY.write_text(json.dumps(entries, ensure_ascii=False, indent=2))
+    write_json_atomic(REGISTRY, entries, ensure_ascii=False, indent=2)
 
 
 def list_all():
@@ -243,7 +362,8 @@ def create(name, link=None, description="", author="", persona=None):
         if not Path(link).is_dir():
             raise ValueError(f"Not a folder: {link}")
     cid = _slug(name)
-    meta = {"name": name, "description": description, "author": author,
+    meta = {"schema": COLLECTION_SCHEMA,
+            "name": name, "description": description, "author": author,
             "created": time.strftime("%Y-%m-%d")}
     if link:
         meta["link"] = link
