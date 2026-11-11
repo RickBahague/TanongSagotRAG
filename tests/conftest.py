@@ -128,7 +128,9 @@ def make_collection(tmp_path):
 
 class FakeLLM:
     """Stdlib OpenAI-compatible chat server (streaming SSE). `reply` is the
-    canned answer; `requests` records every parsed request body."""
+    canned answer — or a callable(body) -> str, to answer different calls
+    (e.g. a follow-up rewrite vs. the answer) differently; `requests`
+    records every parsed request body."""
 
     def __init__(self):
         self.reply = ("The documents describe this in detail "
@@ -145,7 +147,9 @@ class FakeLLM:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                words = fake.reply.split(" ")
+                reply = (fake.reply(body) if callable(fake.reply)
+                         else fake.reply)
+                words = reply.split(" ")
                 for i, w in enumerate(words):
                     piece = w if i == 0 else " " + w
                     ev = {"choices": [{"delta": {"content": piece}}]}

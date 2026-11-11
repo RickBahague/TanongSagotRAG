@@ -81,6 +81,17 @@ QUOTES_TOP_K = 10         # quote curation needs more raw material
 QUOTES_TEMPERATURE = 0.1  # and zero creativity
 QUOTE_MATCH_RATIO = 0.90  # fuzzy-verification floor (difflib ratio)
 
+# Follow-ups (P2-1): recent turns of a conversation feed a one-call
+# standalone-question rewrite (only when rag.is_followup() says the question
+# depends on them) and the prompt, inside the LLM_CTX budget.
+FOLLOWUP_TURNS = 3        # recent turns loaded per follow-up
+HISTORY_ANSWER_WORDS = 150  # each past question/answer clipped to this
+REWRITE_MAX_TOKENS = 64   # cap for the rewrite call (temperature 0)
+
+# Every retrieval/gate/generation value above can be overridden PER
+# COLLECTION in collections/<id>/settings.json (P2-8; read through
+# Collection.setting(), falling back to these defaults).
+
 # ---------------------------------------------------------------------------
 # Generation backend — configurable.
 #

@@ -1,11 +1,16 @@
 """Conversation persistence (design.md "Saving conversations" — Option A
 storage + Option B export). Each conversation is a JSONL file of turns:
 
-  {ts, question, mode, answer, sources, verify}
+  {ts, question, mode, answer, sources, verify, citations,
+   rewritten_question}
 
 Stored per collection (data/conversations/), fully isolated between
-collections. The schema deliberately carries everything Option C
-(follow-up memory) will need later.
+collections. `sources` is in prompt order, so an [n] marker in `answer`
+means sources[n-1]. `citations` is rag.check_citations() output
+({"used", "unused", "out_of_range"}) for scholar/persona answers, else
+null; `rewritten_question` is the standalone rewrite retrieval used for a
+follow-up, else null. Older turns may lack the last two keys. recent()
+feeds follow-up memory (P2-1).
 """
 import json
 import re
@@ -24,14 +29,39 @@ def _path(col, cid):
     return col.conversations_dir / (cid + ".jsonl")
 
 
-def append_turn(col, cid, question, mode, answer, sources, verify=None):
+def append_turn(col, cid, question, mode, answer, sources, verify=None,
+                citations=None, rewritten_question=None):
     col.conversations_dir.mkdir(parents=True, exist_ok=True)
     with open(_path(col, cid), "a") as f:
         f.write(json.dumps({
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "question": question, "mode": mode, "answer": answer,
             "sources": sources or [], "verify": verify,
+            "citations": citations,
+            "rewritten_question": rewritten_question,
         }, ensure_ascii=False) + "\n")
+
+
+def recent(col, cid, n=3):
+    """The last `n` turns of conversation `cid` (oldest first); [] when the
+    conversation does not exist yet, the id is unusable, or a line is
+    unreadable."""
+    if not cid or n <= 0:
+        return []
+    try:
+        p = _path(col, cid)
+    except ValueError:
+        return []
+    if not p.exists():
+        return []
+    turns = []
+    for line in open(p):
+        if line.strip():
+            try:
+                turns.append(json.loads(line))
+            except ValueError:
+                continue
+    return turns[-n:]
 
 
 def load(col, cid):

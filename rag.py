@@ -43,6 +43,45 @@ def tokenize(text):
             if w not in STOPWORDS and len(w) > 1]
 
 
+# ------------------------------------------------- per-collection settings --
+# P2-8: tuning values (TOP_K, MIN_SCORE, MIN_COVERAGE, MIN_DENSE_SIM,
+# DENSE_SOLO_SIM, MAX_PER_WORK, POOL_FACTOR, HIERARCHICAL, RERANK,
+# TEMPERATURE, QUOTES_TOP_K, QUOTES_TEMPERATURE, QUOTE_MATCH_RATIO, …) are
+# read through col.setting(), which falls back to config at CALL time. An
+# index built by load_index() carries its collection as `.col`, so functions
+# that only get an index (gate_ok, search) are collection-aware too; an
+# index built by hand (no `.col`) reads config exactly as before.
+
+def _cfg(obj, key):
+    """Setting `key` for a Collection, or for an index carrying `.col`;
+    plain config value when neither is available."""
+    col = obj if callable(getattr(obj, "setting", None)) \
+        else getattr(obj, "col", None)
+    if col is not None:
+        return col.setting(key, getattr(config, key, None))
+    return getattr(config, key)
+
+
+def _attach_col(index, col):
+    """Tag an index and every sub-index it holds with its collection."""
+    seen = set()
+    stack = [index]
+    while stack:
+        ix = stack.pop()
+        if ix is None or id(ix) in seen:
+            continue
+        seen.add(id(ix))
+        try:
+            ix.col = col
+        except AttributeError:
+            continue
+        for attr in ("base", "bm25", "dense"):
+            sub = getattr(ix, attr, None)
+            if sub is not None and not isinstance(sub, (int, float, str)):
+                stack.append(sub)
+    return index
+
+
 def _chunk_files(col):
     """All chunk files of one collection."""
     if not col.chunks_dir.exists():
@@ -146,7 +185,8 @@ class BM25Index:
         n = len(self.docs)
         self.idf = {t: math.log(1 + (n - f + 0.5) / (f + 0.5)) for t, f in df.items()}
 
-    def search(self, query, k=config.TOP_K):
+    def search(self, query, k=None):
+        k = _cfg(self, "TOP_K") if k is None else k
         q = tokenize(query)
         scores = []
         for i, tf in enumerate(self.tf):
@@ -214,7 +254,8 @@ class DenseIndex:
             raise ValueError("vector dimension differs from the encoder's "
                              "— re-run ingest.py --force")
 
-    def search(self, query, k=config.TOP_K):
+    def search(self, query, k=None):
+        k = _cfg(self, "TOP_K") if k is None else k
         q = self.model.encode([config.EMBED_QUERY_PREFIX + query],
                               normalize_embeddings=True)[0]
         sims = self.vecs @ q
@@ -236,7 +277,8 @@ class HybridIndex:
         self.bm25 = BM25Index(self.chunks)
         self.dense = DenseIndex(sources)
 
-    def search(self, query, k=config.TOP_K):
+    def search(self, query, k=None):
+        k = _cfg(self, "TOP_K") if k is None else k
         n = max(config.HYBRID_CANDIDATES, k)
         fused = {}
         for hits in (self.bm25.search(query, n), self.dense.search(query, n)):
@@ -327,7 +369,8 @@ class HierarchicalIndex:
         self.bm25 = base if isinstance(base, BM25Index) else getattr(base, "bm25", None)
         self.dense = base if isinstance(base, DenseIndex) else getattr(base, "dense", None)
 
-    def search(self, query, k=config.TOP_K):
+    def search(self, query, k=None):
+        k = _cfg(self, "TOP_K") if k is None else k
         selected = self.summaries.explore(query)
         pool = self.base.search(query, k * 2)
         scored = []
@@ -358,25 +401,29 @@ def load_index(col):
                   f"Re-run: .venv/bin/python ingest.py -c {col.id} --force")
             base = BM25Index(chunks)
 
-    if config.HIERARCHICAL in ("auto", "on"):
+    hier = col.setting("HIERARCHICAL", config.HIERARCHICAL)
+    if hier in ("auto", "on"):
         summaries = load_summaries(col)
         if summaries:
             try:
-                return HierarchicalIndex(base, SummaryIndex(summaries))
+                return _attach_col(
+                    HierarchicalIndex(base, SummaryIndex(summaries)), col)
             except Exception as e:
                 print(f"[rag] hierarchical retrieval unavailable ({e}) — flat")
-        elif config.HIERARCHICAL == "on":
+        elif hier == "on":
             print("[rag] HIERARCHICAL=on but no summaries — run summarize.py")
-    return base
+    return _attach_col(base, col)
 
 
 _RERANKER = None
 
 
-def _maybe_rerank(query, hits):
-    """Optional cross-encoder reordering of the candidate pool (S4b)."""
+def _maybe_rerank(query, hits, mode=None):
+    """Optional cross-encoder reordering of the candidate pool (S4b).
+    `mode` is the collection's RERANK setting (default: config.RERANK)."""
     global _RERANKER
-    if config.RERANK == "off" or not hits:
+    mode = config.RERANK if mode is None else mode
+    if mode == "off" or not hits:
         return hits
     if _RERANKER is None:
         try:
@@ -413,23 +460,27 @@ def diversify(hits, k, cap=None):
 
 # ------------------------------------------------------------------- gate --
 
-def _gate_min_score(n_docs):
+def _gate_min_score(n_docs, min_score=None):
     """MIN_SCORE was tuned on a ~5k-chunk corpus; BM25 scores scale roughly
     with log(corpus size) via the idf term, so scale the gate down for small
     collections instead of blocking everything they could answer."""
-    return config.MIN_SCORE * min(1.0, math.log1p(n_docs) / math.log1p(5000))
+    min_score = config.MIN_SCORE if min_score is None else min_score
+    return min_score * min(1.0, math.log1p(n_docs) / math.log1p(5000))
 
 
-def bm25_gate_ok(bm, question, with_hits=False):
+def bm25_gate_ok(bm, question, with_hits=False, settings=None):
     """BM25 signal: top score >= the log-scaled MIN_SCORE and a top-k hit
-    covering >= MIN_COVERAGE of the query terms."""
-    hits = bm.search(question, config.TOP_K)
+    covering >= MIN_COVERAGE of the query terms. `settings` (a Collection
+    or an index carrying `.col`) supplies the thresholds; default: `bm`."""
+    src = bm if settings is None else settings
+    hits = bm.search(question, _cfg(src, "TOP_K"))
     qtoks = set(tokenize(question))
     cov = max((sum(1 for t in qtoks
                    if t in set(tokenize(c.get("essay", "") + " " + c["text"])))
                / len(qtoks) for _, c in hits), default=0) if qtoks else 0
-    ok = bool(hits and hits[0][0] >= _gate_min_score(len(bm.chunks))
-              and cov >= config.MIN_COVERAGE)
+    ok = bool(hits and hits[0][0] >= _gate_min_score(
+                  len(bm.chunks), _cfg(src, "MIN_SCORE"))
+              and cov >= _cfg(src, "MIN_COVERAGE"))
     return (ok, hits) if with_hits else ok
 
 
@@ -448,22 +499,23 @@ def gate_ok(index, question):
     its own either (it false-accepts on shared words):
         cos >= DENSE_SOLO_SIM                  — dense alone is convincing
         or (BM25 passes and cos >= MIN_DENSE_SIM) — both signals agree
-    Thresholds and the measurements behind them: config.py."""
+    Thresholds and the measurements behind them: config.py; each one is
+    per-collection (P2-8) through the index's `.col`."""
     dn = index if isinstance(index, DenseIndex) else getattr(index, "dense", None)
     bm = index if isinstance(index, BM25Index) else getattr(index, "bm25", None)
     if dn is None:
-        return bool(bm) and bm25_gate_ok(bm, question)
+        return bool(bm) and bm25_gate_ok(bm, question, settings=index)
     if bm is None:                  # dense-only retrieval: still gate on both
         bm = getattr(dn, "_gate_bm25", None)
         if bm is None:
             bm = dn._gate_bm25 = BM25Index(dn.chunks)
     cos = dense_top_sim(dn, question)
-    if cos >= config.DENSE_SOLO_SIM:
+    if cos >= _cfg(index, "DENSE_SOLO_SIM"):
         return True
-    ok, hits = bm25_gate_ok(bm, question, with_hits=True)
+    ok, hits = bm25_gate_ok(bm, question, with_hits=True, settings=index)
     if not ok:
         return False
-    if cos >= config.MIN_DENSE_SIM:
+    if cos >= _cfg(index, "MIN_DENSE_SIM"):
         return True
     # a source without vectors has no dense signal: there BM25 still decides
     covered = getattr(dn, "_gate_ids", None)
@@ -520,11 +572,13 @@ def _open(req, model):
 
 
 def llm_stream(system, user, temperature=None, model=None, backend=None,
-               url=None):
+               url=None, max_tokens=None):
     """Yield text deltas from the configured backend (config.LLM_BACKEND).
     `model`/`backend`/`url` override the defaults for this call (used by
-    persona mode's dedicated voice model/server)."""
+    persona mode's dedicated voice model/server); `max_tokens` overrides
+    config.LLM_MAX_TOKENS (the follow-up rewrite uses a small cap)."""
     temperature = config.TEMPERATURE if temperature is None else temperature
+    max_tokens = config.LLM_MAX_TOKENS if max_tokens is None else max_tokens
     model = model or config.LLM_MODEL
     backend = backend or config.LLM_BACKEND
     url = url or config.LLM_URL
@@ -535,7 +589,7 @@ def llm_stream(system, user, temperature=None, model=None, backend=None,
             "model": model, "messages": messages, "stream": True,
             "options": {"temperature": temperature,
                         "num_ctx": config.LLM_CTX,
-                        "num_predict": config.LLM_MAX_TOKENS}})
+                        "num_predict": max_tokens}})
         with _open(req, model) as resp:
             for line in resp:
                 if not line.strip():
@@ -551,7 +605,7 @@ def llm_stream(system, user, temperature=None, model=None, backend=None,
         req = _request(f"{base}/chat/completions", {
             "model": model, "messages": messages,
             "temperature": temperature, "stream": True,
-            "max_tokens": config.LLM_MAX_TOKENS})
+            "max_tokens": max_tokens})
         with _open(req, model) as resp:
             for line in resp:
                 line = line.decode("utf-8", "replace").strip()
@@ -573,7 +627,7 @@ def llm_stream(system, user, temperature=None, model=None, backend=None,
             llm = _embedded_llm()
             parts = llm.create_chat_completion(
                 messages=messages, temperature=temperature, stream=True,
-                max_tokens=config.LLM_MAX_TOKENS)
+                max_tokens=max_tokens)
             try:
                 for part in parts:
                     delta = part["choices"][0].get("delta", {}).get("content")
@@ -612,11 +666,20 @@ def persona_disclaimer(col):
             f"{col.author} — not the author.]*\n\n")
 
 
+# Scholar and persona excerpts are numbered [1]…[n] (P2-2): small models
+# follow short numeric markers far more reliably than long titles, and the
+# markers can be checked mechanically (check_citations). Quotes mode keeps
+# its [Section Title, p. N] citations and its verbatim verification.
+_CITE_RULE = ("The excerpts are numbered [1], [2], … . Cite every claim with "
+              "the number of the excerpt it comes from in square brackets, "
+              "e.g. [1] or [2][3]. Use only the numbers of the excerpts "
+              "given.")
+
+
 def system_scholar(col):
     return f"""You are a careful research assistant answering questions about \
 {_collection_label(col)}. Answer ONLY from the excerpts provided. Quote short \
-passages where useful. Cite every claim as [Section Title, p. N] using the metadata \
-given with each excerpt. Excerpt headers may include the year the piece was written; \
+passages where useful. {_CITE_RULE} Excerpt headers may include the year the piece was written; \
 when the question concerns how views changed or developed over time, organize the \
 answer chronologically and name the years. If the excerpts do not answer the \
 question, say the documents provided do not cover it. Never invent facts."""
@@ -627,7 +690,7 @@ def system_persona(col):
 style of the source texts. Ground every statement strictly in the excerpts \
 provided from their writings; do not invent positions. If the excerpts do not \
 cover the question, say plainly that your writings here do not address it. Keep \
-the voice consistent with the excerpts."""
+the voice consistent with the excerpts. {_CITE_RULE}"""
 
 
 # When a fine-tuned voice model is active the style lives in the weights;
@@ -635,7 +698,8 @@ the voice consistent with the excerpts."""
 def system_persona_tuned(col):
     return f"""You are {col.author}. Ground every statement strictly in the \
 excerpts provided from your writings; do not invent positions. If the excerpts \
-do not cover the question, say plainly that your writings here do not address it."""
+do not cover the question, say plainly that your writings here do not address it. \
+{_CITE_RULE}"""
 
 
 def system_quotes(col):
@@ -675,17 +739,152 @@ def chunk_year(c):
     return None
 
 
-def build_context(hits):
+def build_context(hits, numbered=True):
+    """Excerpts joined by '---'. numbered=True (scholar/persona) prefixes
+    excerpt i (1-based, in the given order) with "[i] "; quotes mode passes
+    numbered=False and keeps the plain [label, pages] headers."""
     parts = []
-    for _, c in hits:
+    for i, (_, c) in enumerate(hits, start=1):
         pages = (f"p. {c['page_start']}" if c["page_start"] == c["page_end"]
                  else f"pp. {c['page_start']}-{c['page_end']}")
         work = c.get("work", Path(c["source"]).stem)
         label = c["essay"] if c["essay"] == work else f"{c['essay']} — {work}"
         y = chunk_year(c)
         year = f", {y}" if y else ""
-        parts.append(f"[{label}{year}, {pages}]\n{c['text']}")
+        num = f"[{i}] " if numbered else ""
+        parts.append(f"{num}[{label}{year}, {pages}]\n{c['text']}")
     return "\n\n---\n\n".join(parts)
+
+
+# -------------------------------------------------------------- citations --
+
+# A bracket holding ONLY numbers, commas, spaces and ranges: [3], [1, 3],
+# [1-3], [1–3]. Anything with letters ([Section, p. 3]) is not a marker.
+_CITE_RX = re.compile(r"\[\s*(\d+(?:\s*(?:,|-|–|—)\s*\d+)*)\s*\]")
+_MAX_RANGE = 50       # [1-3000] is a typo or a year span, not a citation run
+
+
+def citation_markers(answer):
+    """Every number cited by a numeric [n] marker in `answer`, in order of
+    appearance (repeats kept). [2][3] is two markers; [1-3] expands."""
+    out = []
+    for m in _CITE_RX.finditer(answer or ""):
+        for part in m.group(1).split(","):
+            ends = [int(x) for x in re.split(r"\s*[-–—]\s*", part.strip())
+                    if x]
+            if len(ends) == 2 and 0 <= ends[1] - ends[0] <= _MAX_RANGE:
+                out.extend(range(ends[0], ends[1] + 1))
+            else:
+                out.extend(ends)
+    return out
+
+
+def check_citations(answer, n):
+    """Map [n] markers in `answer` against n numbered excerpts. Returns
+    {"used", "unused", "out_of_range"} — sorted, de-duplicated ints:
+    used = cited numbers within 1..n, unused = 1..n never cited,
+    out_of_range = cited numbers outside 1..n."""
+    nums = set(citation_markers(answer))
+    used = sorted(x for x in nums if 1 <= x <= n)
+    return {"used": used,
+            "unused": [i for i in range(1, n + 1) if i not in nums],
+            "out_of_range": sorted(x for x in nums if not 1 <= x <= n)}
+
+
+# ------------------------------------------------------------- follow-ups --
+# P2-1. A follow-up ("what about after 2020?", "why did they do that?")
+# retrieves nothing useful on its own, so it is rewritten into a standalone
+# question with ONE short LLM call before retrieval and the gate.
+#
+# is_followup() is a deterministic heuristic, applied only when there IS
+# recent history (a first turn is never rewritten). A question is a
+# follow-up when ANY of these holds:
+#   1. pronoun/demonstrative: it, its, they, them, their, this, that, these,
+#      those, he, him, his, she, her, hers, the same, such, the former,
+#      the latter, there
+#   2. continuation / ellipsis cue at the start: and, but, or, also, so,
+#      then, what about, how about, what else, why not, more, tell me more,
+#      go on, continue, same, compared; or an explicit "..." / "…"
+#   3. short: at most FOLLOWUP_MAX_TERMS content terms (after stopwords).
+# A false positive costs one small LLM call whose rewrite of an already
+# standalone question is that question; a miss just answers as before.
+
+_PRONOUN_RX = re.compile(
+    r"\b(?:it|its|they|them|their|theirs|this|that|these|those|he|him|his|"
+    r"she|her|hers|there|such|the same|the former|the latter)\b", re.I)
+_CONTINUE_RX = re.compile(
+    r"^\s*(?:and|but|or|also|so|then|what about|how about|what else|"
+    r"why not|more|tell me more|go on|continue|same|compared)\b", re.I)
+FOLLOWUP_MAX_TERMS = 2
+
+
+def is_followup(question):
+    """True when `question` looks like it depends on earlier turns (see the
+    rules above). Pure function of the text."""
+    q = question or ""
+    if "..." in q or "…" in q:
+        return True
+    if _PRONOUN_RX.search(q) or _CONTINUE_RX.search(q):
+        return True
+    return len(tokenize(q)) <= FOLLOWUP_MAX_TERMS
+
+
+def _clip_words(text, n):
+    """Whitespace-collapsed text, cut to n words (+ "…" when cut)."""
+    w = (text or "").split()
+    return " ".join(w[:n] + (["…"] if len(w) > n else []))
+
+
+def _history_text(turns, answer_words):
+    lines = []
+    for t in turns:
+        lines.append(f"Q: {_clip_words(t.get('question', ''), answer_words)}")
+        lines.append(f"A: {_clip_words(t.get('answer', ''), answer_words)}")
+    return "\n".join(lines)
+
+
+REWRITE_SYSTEM = ("You rewrite a follow-up question into one standalone "
+                  "question that can be understood without the conversation. "
+                  "Resolve pronouns and references using the conversation. "
+                  "Do not answer it. Reply with the standalone question only, "
+                  "on one line.")
+
+
+def _clean_rewrite(text, question):
+    """The rewrite's first non-empty line, stripped of labels/quotes, or
+    None when it is junk (empty, no letters, or implausibly long)."""
+    line = next((l.strip() for l in (text or "").splitlines() if l.strip()),
+                "")
+    line = re.sub(r"^(?:standalone(?: question)?|question|rewritten"
+                  r"(?: question)?)\s*:\s*", "", line, flags=re.I)
+    line = line.strip().strip('"“”\'`').strip()
+    if not re.search(r"[A-Za-z]", line):
+        return None
+    limit = max(40, 3 * len(question.split()) + 30)
+    if len(line.split()) > limit or len(line) > 400:
+        return None
+    return line
+
+
+def rewrite_question(col, question, history):
+    """One standalone-question LLM call (temperature 0, small max_tokens).
+    Returns the rewrite, or None when there is no history, the question is
+    not a follow-up, the call fails, or the reply is junk (the caller then
+    keeps the original question)."""
+    if not history or not is_followup(question):
+        return None
+    words = _cfg(col, "HISTORY_ANSWER_WORDS")
+    user = (f"Conversation:\n{_history_text(history, words)}\n\n"
+            f"Follow-up question: {question}\n\nStandalone question:")
+    try:
+        text = "".join(llm_stream(REWRITE_SYSTEM, user, temperature=0,
+                                  max_tokens=_cfg(col, "REWRITE_MAX_TOKENS")))
+    except Exception:
+        return None
+    out = _clean_rewrite(text, question)
+    if out is None or out.strip().lower() == question.strip().lower():
+        return None
+    return out
 
 
 # ------------------------------------------------------------ token budget --
@@ -699,9 +898,14 @@ def _words(text):
     return len(text.split())
 
 
-def user_prompt(context, question):
-    return (f"Excerpts from the documents:\n\n{context}"
-            f"\n\nQuestion: {question}")
+def user_prompt(context, question, history_text="", standalone=None):
+    """User message: optional recent conversation, the excerpts, and the
+    question (with its standalone rewrite when there is one)."""
+    head = (f"Earlier in this conversation:\n{history_text}\n\n"
+            if history_text else "")
+    q = f"{question}\n(Standalone form: {standalone})" if standalone \
+        else question
+    return f"{head}Excerpts from the documents:\n\n{context}\n\nQuestion: {q}"
 
 
 def _order_for_prompt(hits, question):
@@ -713,7 +917,8 @@ def _order_for_prompt(hits, question):
     return list(hits)
 
 
-def fit_context(system, question, hits):
+def fit_context(system, question, hits, history=None, numbered=True,
+                standalone=None, order_question=None):
     """Budget the prompt to the model window.
 
     `hits` must be ranked best-first. Returns (sent_hits, user, dropped):
@@ -722,26 +927,51 @@ def fit_context(system, question, hits):
     best hit alone does not fit, its text is truncated (on a copy; the
     indexed chunk is never mutated, and the copy carries "truncated": True)
     rather than sending no excerpt. sent_hits are in presentation order
-    (chronological for evolution questions). Config is read at call time."""
+    (chronological for evolution questions). Config is read at call time.
+
+    `history` (recent turns, oldest first) is trimmed BEFORE any excerpt:
+    oldest turns go first, and only once no history is left are hits
+    dropped. See fit_prompt() for how many turns were kept."""
+    sent, user, dropped, _ = fit_prompt(system, question, hits, history,
+                                        numbered, standalone, order_question)
+    return sent, user, dropped
+
+
+def fit_prompt(system, question, hits, history=None, numbered=True,
+               standalone=None, order_question=None, answer_words=None):
+    """fit_context() plus the number of history turns kept:
+    (sent_hits, user, dropped, history_used)."""
     budget_x100 = (config.LLM_CTX - config.LLM_MAX_TOKENS) * 100
     sys_words = _words(system)
+    history = list(history or [])
+    answer_words = (config.HISTORY_ANSWER_WORDS if answer_words is None
+                    else answer_words)
+    oq = order_question or question
 
-    def build(kept):
-        ordered = _order_for_prompt(kept, question)
-        user = user_prompt(build_context(ordered), question)
+    def build(kept, turns=()):
+        ordered = _order_for_prompt(kept, oq)
+        user = user_prompt(build_context(ordered, numbered), question,
+                           _history_text(turns, answer_words), standalone)
         ok = (sys_words + _words(user)) * _TOK_PER_WORD_X100 <= budget_x100
         return ok, ordered, user
+
+    # history first: keep the most recent turns that fit with ALL hits
+    if hits:
+        for n_hist in range(len(history), 0, -1):
+            ok, ordered, user = build(list(hits), history[-n_hist:])
+            if ok:
+                return ordered, user, 0, n_hist
 
     kept = list(hits)
     while kept:
         ok, ordered, user = build(kept)
         if ok:
-            return ordered, user, len(hits) - len(kept)
+            return ordered, user, len(hits) - len(kept), 0
         if len(kept) == 1:
             break
         kept.pop()                    # lowest retrieval rank goes first
     if not kept:
-        return [], user_prompt("", question), 0
+        return [], user_prompt("", question, standalone=standalone), 0, 0
 
     # A single excerpt is still over budget: truncate its text to fit.
     s, c = kept[0]
@@ -752,7 +982,7 @@ def fit_context(system, question, hits):
     short = dict(c, text=" ".join(text_words[:allowed] + ["…"]),
                  truncated=True)
     _, ordered, user = build([(s, short)])
-    return ordered, user, len(hits) - 1
+    return ordered, user, len(hits) - 1, 0
 
 
 # ------------------------------------------------------------ era parsing --
@@ -985,7 +1215,7 @@ _MIN_RUN = 10      # only contiguous runs this long count toward coverage
 _MAX_GAP = 12      # any longer unmatched stretch inside the quote = misquote
 
 
-def _segment_ok(seg, chunks):
+def _segment_ok(seg, chunks, ratio=None):
     """Does this quote segment occur (near-)verbatim in any chunk?
     Coverage counts only significant contiguous runs, and any large
     unmatched stretch (e.g. inserted/altered words) fails the quote.
@@ -1010,20 +1240,22 @@ def _segment_ok(seg, chunks):
         if coverage > best[0]:
             best = (coverage, c["id"], max_gap)
     coverage, cid, max_gap = best
-    ok = coverage >= config.QUOTE_MATCH_RATIO and max_gap <= _MAX_GAP
+    ratio = config.QUOTE_MATCH_RATIO if ratio is None else ratio
+    ok = coverage >= ratio and max_gap <= _MAX_GAP
     return ok, cid
 
 
-def verify_quotes(answer, chunks):
+def verify_quotes(answer, chunks, ratio=None):
     """Check every blockquote in `answer` against the retrieved chunks.
-    Ellipsized quotes are verified segment by segment. Returns
+    Ellipsized quotes are verified segment by segment. `ratio` is the
+    collection's QUOTE_MATCH_RATIO (default: config). Returns
     [{"text", "ok", "chunk_id"}]."""
     results = []
     for q in extract_quotes(answer):
         segs = [s for s in re.split(r"…|\.\.\.", q) if s.strip()]
         oks, cid = [], None
         for seg in segs:
-            ok, chunk_id = _segment_ok(seg, chunks)
+            ok, chunk_id = _segment_ok(seg, chunks, ratio)
             oks.append(ok)
             cid = cid or chunk_id
         results.append({"text": q, "ok": all(oks), "chunk_id": cid})
@@ -1032,26 +1264,45 @@ def verify_quotes(answer, chunks):
 
 # -------------------------------------------------------------------- ask --
 
-def ask_stream(col, question, mode="scholar", index=None, k=None):
-    """Returns {"sources", "mode", "stream", "answer", "dropped"}.
+def ask_stream(col, question, mode="scholar", index=None, k=None,
+               history=None):
+    """Returns {"sources", "mode", "stream", "answer", "dropped",
+    "rewritten_question", "history_used"}.
+
     stream is a generator of text deltas, or None when the question is
     gated out (then "answer" holds the fallback text). "sources" lists only
-    the excerpts actually sent; "dropped" counts hits removed to fit the
-    model window (config.LLM_CTX - config.LLM_MAX_TOKENS)."""
+    the excerpts actually sent, in prompt order: excerpt [n] in the prompt
+    is sources[n-1]. "dropped" counts hits removed to fit the model window
+    (config.LLM_CTX - config.LLM_MAX_TOKENS).
+
+    `history`: recent turns [{question, answer}, …], oldest first (the
+    caller passes at most FOLLOWUP_TURNS). When non-empty and the question
+    looks like a follow-up (is_followup), ONE rewrite call produces a
+    standalone question; retrieval, era parsing and the gate then use it
+    ("rewritten_question", else None). The turns go into the prompt inside
+    the token budget, trimmed before any excerpt ("history_used" = turns
+    kept). Every tuning value is read per collection (col.setting)."""
     if mode not in available_modes(col):
         mode = "scholar"
     index = index or load_index(col)
-    if not gate_ok(index, question):
+    n_turns = max(int(_cfg(col, "FOLLOWUP_TURNS")), 0)
+    history = list(history or [])[-n_turns:] if n_turns else []
+    rewritten = rewrite_question(col, question, history) if history else None
+    query = rewritten or question
+    if not gate_ok(index, query):
         return {"answer": not_covered(col), "sources": [], "mode": mode,
-                "stream": None, "dropped": 0}
+                "stream": None, "dropped": 0,
+                "rewritten_question": rewritten, "history_used": 0}
     system_fn, temp_key, k_key = MODES.get(mode, MODES["scholar"])
     system = system_fn(col)
-    temperature = getattr(config, temp_key) if temp_key else None
+    temperature = _cfg(col, temp_key or "TEMPERATURE")
     if k is None:                       # mode default unless caller set -k
-        k = getattr(config, k_key) if k_key else config.TOP_K
-    era = parse_era(question)
-    pool = apply_era(index.search(question, k * config.POOL_FACTOR), era, k)
-    hits = diversify(_maybe_rerank(question, pool), k)   # best-first
+        k = _cfg(col, k_key or "TOP_K")
+    era = parse_era(query)
+    pool = apply_era(index.search(query, k * _cfg(col, "POOL_FACTOR")),
+                     era, k)
+    hits = diversify(_maybe_rerank(query, pool, _cfg(col, "RERANK")), k,
+                     cap=_cfg(col, "MAX_PER_WORK"))        # best-first
     model = backend = burl = None
     persona = col.persona
     if mode == "persona" and persona and persona.get("model"):
@@ -1059,9 +1310,12 @@ def ask_stream(col, question, mode="scholar", index=None, k=None):
         backend = persona.get("backend") or None
         burl = persona.get("url") or None
         system = system_persona_tuned(col)
-    # Budget against the final system prompt; drops by retrieval rank, then
-    # orders chronologically for evolution questions (see fit_context).
-    hits, user, dropped = fit_context(system, question, hits)
+    # Budget against the final system prompt; trims history, then drops by
+    # retrieval rank, then orders chronologically for evolution questions.
+    hits, user, dropped, used = fit_prompt(
+        system, question, hits, history, numbered=(mode != "quotes"),
+        standalone=rewritten, order_question=query,
+        answer_words=_cfg(col, "HISTORY_ANSWER_WORDS"))
     gen = llm_stream(system, user, temperature=temperature, model=model,
                      backend=backend, url=burl)
     sources = [{"id": c["id"], "essay": c["essay"], "year": chunk_year(c),
@@ -1072,14 +1326,20 @@ def ask_stream(col, question, mode="scholar", index=None, k=None):
                 **({"truncated": True} if c.get("truncated") else {})}
                for s, c in hits]
     return {"sources": sources, "mode": mode, "stream": gen, "answer": None,
-            "dropped": dropped}
+            "dropped": dropped, "rewritten_question": rewritten,
+            "history_used": used}
 
 
-def ask(col, question, mode="scholar", index=None, k=None):
-    """Blocking variant: returns {"answer", "sources", "mode"}."""
-    res = ask_stream(col, question, mode=mode, index=index, k=k)
+def ask(col, question, mode="scholar", index=None, k=None, history=None):
+    """Blocking variant: returns {"answer", "sources", "mode", …}; scholar
+    and persona answers also get "citations" (check_citations)."""
+    res = ask_stream(col, question, mode=mode, index=index, k=k,
+                     history=history)
     if res["stream"] is not None:
         res["answer"] = "".join(res["stream"])
+        if res["mode"] != "quotes":
+            res["citations"] = check_citations(res["answer"],
+                                               len(res["sources"]))
         if res["mode"] == "persona":
             res["answer"] = persona_disclaimer(col) + res["answer"]
     res.pop("stream", None)
@@ -1101,8 +1361,9 @@ class Runtime:
         self.by_id, self.groups = build_reader(self.index.chunks)
         self.quote_bank = load_quote_bank(col)
 
-    def ask_stream(self, question, mode="scholar", k=None):
-        return ask_stream(self.col, question, mode=mode, index=self.index, k=k)
+    def ask_stream(self, question, mode="scholar", k=None, history=None):
+        return ask_stream(self.col, question, mode=mode, index=self.index, k=k,
+                          history=history)
 
     def passage(self, chunk_id, before=1, after=1):
         return passage(self.col, self.by_id, self.groups, chunk_id,

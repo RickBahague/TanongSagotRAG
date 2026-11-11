@@ -8,7 +8,9 @@ All corpus routes are collection-scoped under /c/<id>/…:
                                      persona?} → create
   DELETE /collections/<id>          remove collection + derived data
   GET    /c/<id>/stats              capabilities + per-source table
-  POST   /c/<id>/ask                NDJSON stream: meta, delta, verify, done
+  POST   /c/<id>/ask                NDJSON stream: meta, delta…, then
+                                     verify (quotes) or citations
+                                     (scholar/persona), done
   POST   /c/<id>/ingest             (re)ingest; NDJSON progress events
   POST   /c/<id>/import             file upload (X-Filename header)
   GET    /c/<id>/passage?id=…       windowed/full stitched passage (reader)
@@ -679,12 +681,21 @@ class Handler(BaseHTTPRequestHandler):
         w = self._w
         try:
             col = rt.col
-            conv = req.get("conversation_id") or conversations.new_id()
+            given = req.get("conversation_id")
+            conv = given or conversations.new_id()
+            # follow-up memory (P2-1): last turns of an existing conversation
+            history = conversations.recent(
+                col, given, int(col.setting("FOLLOWUP_TURNS", 3))) \
+                if given else []
             res = rt.ask_stream(req["question"],
-                                mode=req.get("mode", "scholar"))
+                                mode=req.get("mode", "scholar"),
+                                history=history)
+            # sources are in prompt order: answer marker [n] == sources[n-1]
             w({"type": "meta", "mode": res["mode"], "sources": res["sources"],
-               "conversation_id": conv, "dropped": res.get("dropped", 0)})
-            verify = None
+               "conversation_id": conv, "dropped": res.get("dropped", 0),
+               "rewritten_question": res.get("rewritten_question"),
+               "history_used": res.get("history_used", 0)})
+            verify = citations = None
             if res["stream"] is None:
                 answer = res["answer"]
                 w({"type": "delta", "text": answer})
@@ -698,10 +709,18 @@ class Handler(BaseHTTPRequestHandler):
                 if res["mode"] == "quotes" and res["sources"]:
                     chunks = [rt.by_id[s["id"]] for s in res["sources"]
                               if s["id"] in rt.by_id]
-                    verify = rag.verify_quotes(answer, chunks)
+                    verify = rag.verify_quotes(
+                        answer, chunks, col.setting("QUOTE_MATCH_RATIO"))
                     w({"type": "verify", "quotes": verify})
-            conversations.append_turn(col, conv, req["question"], res["mode"],
-                                      answer, res["sources"], verify)
+                elif res["mode"] != "quotes":
+                    # scholar/persona: map [n] markers onto the sources
+                    citations = rag.check_citations(answer,
+                                                    len(res["sources"]))
+                    w({"type": "citations", **citations})
+            conversations.append_turn(
+                col, conv, req["question"], res["mode"], answer,
+                res["sources"], verify, citations=citations,
+                rewritten_question=res.get("rewritten_question"))
             w({"type": "done"})
         except urllib.error.URLError:
             w({"type": "error", "error":

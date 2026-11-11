@@ -18,10 +18,13 @@ import rag
 
 def print_result(res, mode, rt):
     """Stream the answer to stdout as tokens arrive, then list sources.
-    Returns (answer_text, verify_results) for transcript saving."""
+    Returns (answer_text, verify_results, citations) for transcript
+    saving (citations: rag.check_citations output, scholar/persona only)."""
     print()
+    if res.get("rewritten_question"):
+        print(f"(searched for: {res['rewritten_question']})\n")
     full = []
-    verify = None
+    verify = citations = None
     if res["stream"] is None:
         print(res["answer"])
         full = [res["answer"]]
@@ -35,22 +38,33 @@ def print_result(res, mode, rt):
     if res["mode"] == "quotes" and full and res["sources"]:
         chunks = [rt.by_id[s["id"]] for s in res["sources"]
                   if s["id"] in rt.by_id]
-        verify = rag.verify_quotes("".join(full), chunks)
+        verify = rag.verify_quotes("".join(full), chunks,
+                                   rt.col.setting("QUOTE_MATCH_RATIO"))
         print("\nQuote check:")
         for r in verify:
             mark = "✓" if r["ok"] else "⚠ NOT FOUND VERBATIM"
             print(f"  {mark}  “{r['text'][:70]}…”" if len(r["text"]) > 70
                   else f"  {mark}  “{r['text']}”")
+    numbered = res["mode"] != "quotes"
+    if numbered and res["stream"] is not None:
+        citations = rag.check_citations("".join(full), len(res["sources"]))
+        if citations["out_of_range"]:
+            bad = ", ".join(f"[{n}]" for n in citations["out_of_range"])
+            print(f"\n⚠ Citation check: {bad} do not match any of the "
+                  f"{len(res['sources'])} excerpts sent.")
     if res["sources"]:
         print("\nSources:")
-        for s in res["sources"]:
+        for i, s in enumerate(res["sources"], start=1):
             pages = (f"p. {s['page_start']}" if s["page_start"] == s["page_end"]
                      else f"pp. {s['page_start']}-{s['page_end']}")
             where = (s["essay"] if s["essay"] == s["work"]
                      else f"{s['essay']} — {s['work']}")
-            print(f"  - {where}, {pages}")
+            unused = citations and i in citations["unused"]
+            num = f"[{i}] " if numbered else "- "
+            print(f"  {num}{where}, {pages}"
+                  + ("  (not cited)" if unused else ""))
     print()
-    return "".join(full), verify
+    return "".join(full), verify, citations
 
 
 def main():
@@ -105,11 +119,16 @@ def main():
 
     def run(q):
         try:
-            res = rt.ask_stream(q, mode=args.mode, k=args.k)
-            answer, verify = print_result(res, args.mode, rt)
+            # --chat: in-memory follow-up memory (same rules as /ask)
+            history = turns[-int(col.setting("FOLLOWUP_TURNS", 3)):] \
+                if turns and col.setting("FOLLOWUP_TURNS", 3) else []
+            res = rt.ask_stream(q, mode=args.mode, k=args.k, history=history)
+            answer, verify, citations = print_result(res, args.mode, rt)
             turns.append({"ts": "", "question": q, "mode": res["mode"],
                           "answer": answer, "sources": res["sources"],
-                          "verify": verify})
+                          "verify": verify, "citations": citations,
+                          "rewritten_question":
+                              res.get("rewritten_question")})
         except urllib.error.URLError:
             sys.exit(f"Cannot reach {config.LLM_BACKEND} backend at "
                      f"{config.LLM_URL} (model {config.LLM_MODEL}). Check "

@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-11-12
+
+### Feature — M3: follow-up questions, numbered citations, per-collection tuning
+Milestone M3 of `implem-plan-enhancements.md` (P2-1, P2-2, P2-8), run as a
+backend subagent then a UI subagent. `bash scripts/verify.sh M3` passes;
+fixture eval identical to M2 (defaults unchanged).
+- **Per-collection settings** (`rag.py`, `config.py`): TOP_K, MIN_SCORE,
+  MIN_COVERAGE, MIN_DENSE_SIM, DENSE_SOLO_SIM, MAX_PER_WORK, POOL_FACTOR,
+  HIERARCHICAL, RERANK, TEMPERATURE and the quotes settings are read through
+  `col.setting()`, so `settings.json` overrides apply per collection.
+- **Numbered citations** (`rag.py`, `serve.py`, `ask.py`,
+  `conversations.py`): excerpts are numbered `[1]…[n]`; scholar/persona
+  prompts ask for `[n]`; `check_citations()` reports used/unused/out-of-range
+  markers; `/ask` emits a `citations` event and saves it with the turn.
+  Quotes mode unchanged.
+- **Follow-ups** (`rag.py`, `serve.py`, `ask.py --chat`): the last 3 turns
+  are loaded; a deterministic follow-up detector triggers one standalone
+  rewrite call used for retrieval and the gate; history goes into the prompt
+  inside the token budget and is trimmed before excerpts; `meta` reports
+  `rewritten_question`.
+- **UI** (`static/index.html`): `[n]` markers link to the reader, sources
+  list numbered with uncited ones dimmed, warning chip for out-of-range
+  markers, "searched for: …" line; reopened conversations render the same.
+- Tests: `tests/test_m3a_answer_quality.py` (15); `tests/conftest.py`
+  fake LLM accepts a callable reply; baseline
+  `tests/fixtures/baselines/M3.json` (177 passed).
+
 ## 2026-11-11
 
 ### Bug fix — M2: dense retrieval on the ONNX path, relevance gate, eval tooling
