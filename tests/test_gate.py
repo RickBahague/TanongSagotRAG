@@ -14,8 +14,15 @@ from helpers import load_eval
 QUESTIONS = load_eval()
 ON = [q for q in QUESTIONS if q["expect"]]
 OFF = [q for q in QUESTIONS if not q["expect"]]
-# known BM25 false-reject: 2 of 5 query terms in the chunk (< MIN_COVERAGE)
+# known BM25 false-reject: 2 of 5 query terms in the chunk (< MIN_COVERAGE).
+# With a dense signal (M2-C) the gate accepts it: top-1 cosine 0.8046 >=
+# DENSE_SOLO_SIM, so it is only expected to fail on a BM25-only index.
 KNOWN_FALSE_REJECTS = {"What can ice cores tell us about past climate?"}
+
+
+def _has_dense(index):
+    return isinstance(index, rag.DenseIndex) or \
+        getattr(index, "dense", None) is not None
 
 
 @pytest.fixture
@@ -37,7 +44,8 @@ def test_expected_section_in_top3(index, q):
 
 @pytest.mark.parametrize("q", ON, ids=lambda q: q["q"][:40])
 def test_gate_accepts_on_topic(index, q):
-    assert rag.gate_ok(index, q["q"]) is (q["q"] not in KNOWN_FALSE_REJECTS)
+    expected = _has_dense(index) or q["q"] not in KNOWN_FALSE_REJECTS
+    assert rag.gate_ok(index, q["q"]) is expected
 
 
 @pytest.mark.parametrize("q", OFF, ids=lambda q: q["q"][:40])

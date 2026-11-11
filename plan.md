@@ -82,3 +82,55 @@ Only if pywebview limits bite (menus, auto-update, installer polish). Electron s
 | Bundle size / model licensing | Qwen Apache-2.0; no corpus shipped, so no rights questions at all |
 
 **Total estimate: ~2 weeks to desktop v1 (end of Phase 5).**
+
+## M2 eval — 2026-11-11 (fixture + IBON; small corpora, re-run on a real collection)
+
+Dense retrieval now runs on the bundled ONNX encoder (`encoder.py`):
+bge-small-en-v1.5 with **CLS pooling, 512-token limit**, read from the model's
+own `1_Pooling/config.json` / `sentence_bert_config.json` (previously the
+encoder mean-pooled and truncated at 256 — P0-2). Vectors carry
+`model/pooling/max_len/src_hash` tags; older untagged vectors re-embed once.
+ONNX vs sentence-transformers parity is still unverified (sentence-transformers
+not installed by design).
+
+**Chunks over the 512-token encoder limit** (input to the P0-2 `CHUNK_WORDS`
+decision, not yet changed): fixture 0/16 (max 170 tokens); writings/IBON
+**8/14** (median 607, max 676 tokens) — the tail of most full-size IBON chunks
+is not embedded.
+
+**Dense gate (P0-3).** The old dense branch accepted at cosine ≥ 0.25
+(`cos*20 >= MIN_SCORE`) and was OR'd with BM25, so once vectors existed every
+question passed. Measured raw top-1 cosine over 135 labelled pairs (fixture
+corpus, 5 single-topic fixture collections asked the other topics, IBON with
+10 on-topic + 5 off-topic questions): on-topic 0.61–0.85, off-topic 0.29–0.64 —
+the groups overlap, so no single threshold separates them.
+
+| Gate rule (FA / FR over 95 neg / 40 pos) | FA | FR |
+|---|---|---|
+| old: BM25 OR cos ≥ 0.25 | 95 | 0 |
+| BM25 only | 1 | 2 |
+| dense only, best (t = 0.61) | 1 | 0 |
+| BM25 OR dense ≥ 0.64 | 1 | 0 |
+| BM25 AND dense ≥ 0.57–0.61 | 0 | 2 |
+| **chosen: cos ≥ 0.72, or (BM25 ok AND cos ≥ 0.57)** | **0** | **0** |
+
+Also 0/0 on 15 extra cross-corpus negatives (fixture questions asked of IBON).
+New settings `MIN_DENSE_SIM = 0.57` (margin ≈0.04 each side) and
+`DENSE_SOLO_SIM = 0.72` (margin ≈0.08 each side); BM25-only collections are
+unchanged. Known limit: paraphrased on-topic questions with little word
+overlap and cosine < 0.72 will be gated out.
+
+**Retrieval before → after the gate change** (`eval.py --json --variants`;
+hierarchical and +rerank unavailable — no summaries, no reranker):
+
+| Collection / variant | hit@1 | hit@10 | recall@10 | MRR | FA | FR |
+|---|---|---|---|---|---|---|
+| fixture, bm25 | 0.933 | 1.0 | 0.967 | 0.967 | 0 → 0 | 1 → 1 |
+| fixture, hybrid | 0.933 | 1.0 | 1.0 | 0.967 | 5 → 0 | 0 → 0 |
+| IBON, bm25 | 0.90 | 1.0 | 0.967 | 0.933 | 0 → 0 | 0 → 0 |
+| IBON, hybrid | 0.90 | 1.0 | 0.967 | 0.933 | 5 → 0 | 0 → 0 |
+
+Hybrid equals BM25 on hit@k/MRR here (corpora too small to discriminate);
+it improves recall@10 on the fixture and fixes the ice-cores false reject
+through the dense gate. Verify yardstick (`tests/eval_fixture.py`, HybridIndex):
+hit@1 0.933, hit@10 1.0, MRR 0.967, FA 0, FR 0.

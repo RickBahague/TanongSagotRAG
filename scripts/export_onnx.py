@@ -7,10 +7,16 @@ just download it:
 
   .venv/bin/python scripts/export_onnx.py
 
-Produces models/encoder-onnx/{model.onnx,tokenizer.json} (the directory
-config.ONNX_ENCODER_DIR points at). Once present, rag.OnnxEncoder is used
-automatically for query encoding. If sentence-transformers is installed,
-output is sanity-checked against it.
+Produces, in models/encoder-onnx/ (config.ONNX_ENCODER_DIR):
+  model.onnx, tokenizer.json
+  1_Pooling/config.json, sentence_bert_config.json   (sentence-transformers
+      pooling mode and max_seq_length — encoder.OnnxEncoder reads these so
+      its vectors match sentence-transformers')
+Files already present are kept; missing ones are downloaded, so re-running
+this on an older models/ dir adds just the two config files. Once present,
+encoder.get_encoder() uses the ONNX encoder for both corpus embedding and
+queries. If sentence-transformers is installed, output is sanity-checked
+against it.
 """
 import sys
 import urllib.request
@@ -22,7 +28,9 @@ import config  # noqa: E402
 OUT = config.ONNX_ENCODER_DIR
 BASE = f"https://huggingface.co/{config.EMBED_MODEL}/resolve/main"
 FILES = {"model.onnx": f"{BASE}/onnx/model.onnx",
-         "tokenizer.json": f"{BASE}/tokenizer.json"}
+         "tokenizer.json": f"{BASE}/tokenizer.json",
+         "1_Pooling/config.json": f"{BASE}/1_Pooling/config.json",
+         "sentence_bert_config.json": f"{BASE}/sentence_bert_config.json"}
 
 
 def main():
@@ -30,17 +38,22 @@ def main():
     for name, url in FILES.items():
         dest = OUT / name
         if dest.exists():
-            print(f"already present: {dest.name}")
+            print(f"already present: {name}")
             continue
         print(f"downloading {name} …")
-        urllib.request.urlretrieve(url, dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        urllib.request.urlretrieve(url, tmp)
+        tmp.replace(dest)
         print(f"  -> {dest} ({dest.stat().st_size/1e6:.1f} MB)")
 
     # verify the encoder loads and, if possible, matches sentence-transformers
-    from rag import OnnxEncoder
+    from encoder import OnnxEncoder
     texts = ["How do glaciers carve valleys over thousands of years?"]
-    a = OnnxEncoder(OUT).encode(texts)[0]
-    print(f"OnnxEncoder OK (dim={len(a)})")
+    enc = OnnxEncoder(OUT)
+    a = enc.encode(texts)[0]
+    print(f"OnnxEncoder OK (dim={len(a)}, pooling={enc.pooling}, "
+          f"max_len={enc.max_len})")
     try:
         import numpy as np
         from sentence_transformers import SentenceTransformer

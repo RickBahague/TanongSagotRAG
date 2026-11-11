@@ -824,16 +824,20 @@ def file_hash(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def vectors_stale(out, src_file, n_items):
+def vectors_stale(out, src_file, n_items, tag=None):
     """Content-based staleness: vectors must have been built from exactly
-    this source file (hash), with the current model, one vector per item.
-    Catches re-chunking, model switches, and partial writes — no mtimes."""
+    this source file (hash), with the current model, pooling and max
+    sequence length (encoder.current_tag(), or `tag`), one vector per item.
+    Catches re-chunking, model/pooling switches, and partial writes — no
+    mtimes. Vectors without pooling/max_len tags (written before they
+    existed) are stale whenever an encoder is available to compare with."""
     if not out.exists():
         return True
     try:
         import numpy as np
+        import encoder
         f = np.load(out)
-        if "model" not in f.files or str(f["model"]) != config.EMBED_MODEL:
+        if encoder.tag_mismatch(f, tag):
             return True
         if "src_hash" not in f.files or str(f["src_hash"]) != file_hash(src_file):
             return True
@@ -842,20 +846,24 @@ def vectors_stale(out, src_file, n_items):
         return True
 
 
-def embed_source(col, chunk_file, force=False, shared=None):
+def embed_source(col, chunk_file, force=False, shared=None, progress=None):
     """Stage 2 for one already-chunked source: embeds its chunks and — only
-    if the Stage-1b summary artifact already exists as text — its summaries.
-    Vector files carry the model name and a hash of the exact source file,
-    so any future re-chunk or re-summarize triggers re-embedding on the
-    next plain ingest run. Pass `shared` (a dict) across calls so the
-    embedding model is loaded once per run, not once per source. Returns
-    (status, shared)."""
+    if the Stage-1b summary artifact already exists as text — its summaries,
+    with the process-wide encoder.get_encoder() (ONNX when bundled, else
+    sentence-transformers) — the same instance rag uses for queries.
+    Vector files carry the model name, pooling, max length and a hash of
+    the exact source file, so any future re-chunk, re-summarize or encoder
+    change triggers re-embedding on the next plain ingest run.
+    `progress(done, total)` is called after every encode batch (total =
+    chunks + summaries to embed for this source). `shared` is kept for
+    callers that pass one dict across calls; it caches the encoder under
+    "model". Returns (status, shared)."""
     parts, todo = [], []
     shared = shared if shared is not None else {}
 
     key = col.key_of_chunk_file(chunk_file)
     out = col.vectors_dir / (key + ".npz")
-    chunks = [json.loads(l) for l in open(chunk_file)]
+    chunks = [json.loads(l) for l in open(chunk_file) if l.strip()]
     if force or vectors_stale(out, chunk_file, len(chunks)):
         todo.append(([c["text"] for c in chunks], out, chunk_file,
                      f"{len(chunks)} chunks"))
@@ -863,7 +871,7 @@ def embed_source(col, chunk_file, force=False, shared=None):
     summ_file = col.summaries_dir / (key + ".jsonl")
     if summ_file.exists():                      # summaries must pre-exist as text
         sout = col.vectors_dir / (key + ".summaries.npz")
-        summs = [json.loads(l) for l in open(summ_file)]
+        summs = [json.loads(l) for l in open(summ_file) if l.strip()]
         if summs and (force or vectors_stale(sout, summ_file, len(summs))):
             todo.append(([f"{s['essay']}. {s['summary']} {s['keywords']}"
                           for s in summs], sout, summ_file,
@@ -873,21 +881,33 @@ def embed_source(col, chunk_file, force=False, shared=None):
         return "up to date", shared
     try:
         import numpy as np
+        import encoder
         if "model" not in shared:
-            from sentence_transformers import SentenceTransformer
-            shared["model"] = SentenceTransformer(config.EMBED_MODEL)
+            shared["model"] = encoder.get_encoder()
     except ImportError:
-        return ("skipped (sentence-transformers not installed — BM25 will "
-                "be used)"), shared
+        return ("skipped (no encoder: neither models/encoder-onnx nor "
+                "sentence-transformers — BM25 will be used)"), shared
     model = shared["model"]
+    tag = model.tag
+    total = sum(len(t) for t, *_ in todo)
+    base = 0
     col.vectors_dir.mkdir(parents=True, exist_ok=True)
     for texts, out, src, label in todo:
+        def batch_done(done, _n, base=base):
+            if progress:
+                progress(base + done, total)
         vecs = model.encode(texts, normalize_embeddings=True,
                             batch_size=config.EMBED_BATCH,
-                            show_progress_bar=True)
-        np.savez(out, vectors=np.asarray(vecs, dtype="float32"),
-                 model=np.array(config.EMBED_MODEL),
+                            progress=batch_done)
+        base += len(texts)
+        # write-then-rename: a crash never leaves a half-written vector file
+        tmp = out.with_name(out.name + ".tmp.npz")
+        np.savez(tmp, vectors=np.asarray(vecs, dtype="float32"),
+                 model=np.array(tag["model"]),
+                 pooling=np.array(tag["pooling"]),
+                 max_len=np.array(int(tag["max_len"])),
                  src_hash=np.array(file_hash(src)))
+        os.replace(tmp, out)
         parts.append(label)
     return "embedded " + " + ".join(parts), shared
 
@@ -1019,7 +1039,11 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
         if not chunk_file.exists():
             emit(stage="embed", source=src.name, status="NOT chunked, skipping")
             continue
-        status, shared = embed_source(col, chunk_file, force, shared)
+        def embed_progress(done, n, name=src.name):
+            emit(stage="embed", source=name, done=done, total=n,
+                 status=f"embedding {done}/{n}")
+        status, shared = embed_source(col, chunk_file, force, shared,
+                                      progress=embed_progress)
         entry = manifest.setdefault(src.name, {})
         entry["embed_status"] = status
         entry["embedded_at"] = now if "embedded" in status else \

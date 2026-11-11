@@ -285,6 +285,7 @@ Serial: `rag.py` is the hot file, so one backend agent, then one UI agent.
 **M3-A · backend** — owns `rag.py`, `serve.py`, `ask.py`, `config.py`,
 `conversations.py`
 - P2-8: route `TOP_K`, `MIN_SCORE`, `MIN_COVERAGE`, `MIN_DENSE_SIM`,
+  `DENSE_SOLO_SIM` (added in M2-C),
   `MAX_PER_WORK`, `POOL_FACTOR`, `HIERARCHICAL`, `RERANK`, `TEMPERATURE`
   and the quotes settings through `col.setting()`. Defaults unchanged.
   Test: two collections with different overrides behave differently in one

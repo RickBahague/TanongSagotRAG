@@ -54,6 +54,19 @@ BM25_K1 = 1.5
 BM25_B = 0.75
 MIN_SCORE = 5.0           # top-hit BM25 score below this → "not covered"
 MIN_COVERAGE = 0.5        # fraction of query terms present in a top hit
+# Dense gate (raw cosine of the top chunk; bge-small, normalized vectors).
+# Unrelated text already sits at ~0.30-0.64 cosine with bge, so the dense
+# signal never passes on its own near those values:
+#   accept  if  cos >= DENSE_SOLO_SIM                       (dense alone)
+#           or  (BM25 signal passes  and  cos >= MIN_DENSE_SIM)
+# BM25-only indexes (no vectors / no encoder) use the BM25 signal alone,
+# unchanged. Measured on the fixture corpus, single-topic fixture
+# collections and writings/IBON (plan.md "M2 eval"; tiny corpora — re-run
+# on a real collection): on-topic top-1 cos >= 0.6118, off-topic <= 0.6383
+# (cross-topic science questions), off-topic that BM25 lets through
+# <= 0.5263, on-topic that BM25 rejects 0.8046.
+MIN_DENSE_SIM = 0.57      # cosine floor when BM25 agrees (BM25 FA veto)
+DENSE_SOLO_SIM = 0.72     # cosine at which dense alone passes the gate
 RRF_K = 60                # reciprocal-rank-fusion constant (hybrid)
 HYBRID_CANDIDATES = 30    # candidates taken from each retriever before fusion
 
@@ -109,7 +122,8 @@ def _apply_settings():
     allowed = {"LLM_BACKEND", "LLM_MODEL", "LLM_URL", "TEMPERATURE", "LLM_CTX",
                "LLM_THREADS", "RETRIEVAL", "TOP_K", "HOST", "PORT",
                "LLM_MODEL_PATH", "EMBED_MODEL", "CHUNK_WORDS",
-               "CHUNK_OVERLAP_WORDS", "SUMMARY_WORKERS", "RERANK"}
+               "CHUNK_OVERLAP_WORDS", "SUMMARY_WORKERS", "RERANK",
+               "MIN_DENSE_SIM", "DENSE_SOLO_SIM"}
     try:
         overrides = json.loads(SETTINGS_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError):

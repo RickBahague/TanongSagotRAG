@@ -3,7 +3,7 @@ local LLM backend (Ollama or any OpenAI-compatible server).
 
 Retrieval (config.RETRIEVAL):
   bm25    pure-Python BM25 (stdlib only) — always available
-  dense   sentence-transformers vectors (data/vectors/)
+  dense   encoder.py vectors (data/vectors/; ONNX or sentence-transformers)
   hybrid  BM25 + dense fused with reciprocal-rank fusion (RRF)
   auto    hybrid when vectors + libs exist, else bm25
 
@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 import config
+import encoder
 import errors
 
 STOPWORDS = set("""a an and are as at be but by for from has have he her his i in is it its
@@ -164,46 +165,26 @@ class BM25Index:
 
 
 # --------------------------------------------------------- query encoders --
+# The encoder lives in encoder.py and is shared with ingest's embed stage
+# (same instance, same pooling/max_len). Old names kept as aliases.
 
-class OnnxEncoder:
-    """MiniLM query encoder via onnxruntime + tokenizers (~60 MB installed).
-    Used in desktop builds instead of the multi-GB torch stack; corpus
-    vectors are precomputed at build time so only queries need encoding."""
-
-    def __init__(self, model_dir):
-        import numpy as np
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
-        self.np = np
-        self.tok = Tokenizer.from_file(str(Path(model_dir) / "tokenizer.json"))
-        self.tok.enable_truncation(max_length=256)
-        self.sess = ort.InferenceSession(str(Path(model_dir) / "model.onnx"),
-                                         providers=["CPUExecutionProvider"])
-
-    def encode(self, texts, **_):
-        np = self.np
-        encs = [self.tok.encode(t) for t in texts]
-        maxlen = max(len(e.ids) for e in encs)
-        ids = np.zeros((len(encs), maxlen), dtype="int64")
-        mask = np.zeros_like(ids)
-        for i, e in enumerate(encs):
-            ids[i, :len(e.ids)] = e.ids
-            mask[i, :len(e.ids)] = e.attention_mask
-        feeds = {"input_ids": ids, "attention_mask": mask}
-        if any(i.name == "token_type_ids" for i in self.sess.get_inputs()):
-            feeds["token_type_ids"] = np.zeros_like(ids)
-        hidden = self.sess.run(None, feeds)[0]          # (B, T, H)
-        m = mask[..., None].astype(hidden.dtype)
-        pooled = (hidden * m).sum(1) / m.sum(1).clip(min=1e-9)  # mean pool
-        return pooled / np.linalg.norm(pooled, axis=1, keepdims=True)
+OnnxEncoder = encoder.OnnxEncoder
 
 
 def _query_encoder():
-    """ONNX encoder when bundled, else sentence-transformers (dev)."""
-    if (config.ONNX_ENCODER_DIR / "model.onnx").exists():
-        return OnnxEncoder(config.ONNX_ENCODER_DIR)
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(config.EMBED_MODEL)
+    """Compatibility alias for encoder.get_encoder()."""
+    return encoder.get_encoder()
+
+
+def _check_vectors(f, label, n):
+    """Raise ValueError when the loaded .npz `f` can't serve `n` items
+    with the current encoder (model/pooling/max_len tag or count)."""
+    why = encoder.tag_mismatch(f)
+    if why:
+        raise ValueError(f"{label}: vectors {why} — re-run ingest.py --force")
+    if len(f["vectors"]) != n:
+        raise ValueError(f"{label}: vectors/chunks mismatch — "
+                         "re-run ingest.py --force")
 
 
 # ------------------------------------------------------------------ dense --
@@ -221,28 +202,26 @@ class DenseIndex:
             if vec_file is None:
                 continue
             f = np.load(vec_file)
-            if "model" in f.files and str(f["model"]) != config.EMBED_MODEL:
-                raise ValueError(f"{stem}: vectors were embedded with "
-                                 f"{f['model']} but EMBED_MODEL is "
-                                 f"{config.EMBED_MODEL} — re-run ingest.py --force")
+            _check_vectors(f, stem, len(chunks))
             vecs = f["vectors"]
-            if len(vecs) != len(chunks):
-                raise ValueError(f"{stem}: vectors/chunks mismatch — "
-                                 "re-run ingest.py --force")
             self.chunks.extend(chunks)
             mats.append(vecs)
         if not mats:
             raise ValueError("no vector files found")
         self.vecs = np.vstack(mats)
-        self.model = _query_encoder()
+        self.model = encoder.get_encoder()
+        if self.model.dim and self.vecs.shape[1] != self.model.dim:
+            raise ValueError("vector dimension differs from the encoder's "
+                             "— re-run ingest.py --force")
 
     def search(self, query, k=config.TOP_K):
         q = self.model.encode([config.EMBED_QUERY_PREFIX + query],
                               normalize_embeddings=True)[0]
         sims = self.vecs @ q
         top = sims.argsort()[::-1][:k]
-        # scale cosine sim to BM25-like range so MIN_SCORE gating still works
-        return [(float(sims[i]) * 20, self.chunks[i]) for i in top if sims[i] > 0]
+        # raw cosine (normalized vectors); the gate compares it against
+        # MIN_DENSE_SIM / DENSE_SOLO_SIM, fusion only uses ranks
+        return [(float(sims[i]), self.chunks[i]) for i in top if sims[i] > 0]
 
 
 # ----------------------------------------------------------------- hybrid --
@@ -306,13 +285,14 @@ class SummaryIndex:
                     ok = False
                     break
                 f = np.load(vec)
-                if len(f["vectors"]) != len(es) or (
-                        "model" in f.files and str(f["model"]) != config.EMBED_MODEL):
+                try:
+                    _check_vectors(f, "summaries", len(es))
+                except ValueError:
                     ok = False
                     break
                 mats.append(f["vectors"])
             if ok and mats:
-                model = _query_encoder()     # may raise → both stay None
+                model = encoder.get_encoder()   # may raise → both stay None
                 self.vecs = np.vstack(mats)
                 self.model = model
         except Exception:
@@ -440,25 +420,56 @@ def _gate_min_score(n_docs):
     return config.MIN_SCORE * min(1.0, math.log1p(n_docs) / math.log1p(5000))
 
 
+def bm25_gate_ok(bm, question, with_hits=False):
+    """BM25 signal: top score >= the log-scaled MIN_SCORE and a top-k hit
+    covering >= MIN_COVERAGE of the query terms."""
+    hits = bm.search(question, config.TOP_K)
+    qtoks = set(tokenize(question))
+    cov = max((sum(1 for t in qtoks
+                   if t in set(tokenize(c.get("essay", "") + " " + c["text"])))
+               / len(qtoks) for _, c in hits), default=0) if qtoks else 0
+    ok = bool(hits and hits[0][0] >= _gate_min_score(len(bm.chunks))
+              and cov >= config.MIN_COVERAGE)
+    return (ok, hits) if with_hits else ok
+
+
+def dense_top_sim(dn, question):
+    """Raw cosine of the best-matching chunk (0.0 when nothing is > 0)."""
+    hits = dn.search(question, 1)
+    return hits[0][0] if hits else 0.0
+
+
 def gate_ok(index, question):
-    """Is the question answerable from the corpus? Checks whichever
-    retrieval signals the index provides; passes if any signal is strong."""
-    bm = index if isinstance(index, BM25Index) else getattr(index, "bm25", None)
-    if bm:
-        hits = bm.search(question, config.TOP_K)
-        qtoks = set(tokenize(question))
-        cov = max((sum(1 for t in qtoks
-                       if t in set(tokenize(c.get("essay", "") + " " + c["text"])))
-                   / len(qtoks) for _, c in hits), default=0) if qtoks else 0
-        if (hits and hits[0][0] >= _gate_min_score(len(bm.chunks))
-                and cov >= config.MIN_COVERAGE):
-            return True
+    """Is the question answerable from the corpus?
+
+    BM25-only index: the BM25 signal alone (unchanged behaviour).
+    With a dense signal (cosine of the top chunk), bge puts unrelated text
+    at ~0.3-0.64, so dense can't pass by a low bar and BM25 can't pass on
+    its own either (it false-accepts on shared words):
+        cos >= DENSE_SOLO_SIM                  — dense alone is convincing
+        or (BM25 passes and cos >= MIN_DENSE_SIM) — both signals agree
+    Thresholds and the measurements behind them: config.py."""
     dn = index if isinstance(index, DenseIndex) else getattr(index, "dense", None)
-    if dn:
-        hits = dn.search(question, 1)
-        if hits and hits[0][0] >= config.MIN_SCORE:
-            return True
-    return False
+    bm = index if isinstance(index, BM25Index) else getattr(index, "bm25", None)
+    if dn is None:
+        return bool(bm) and bm25_gate_ok(bm, question)
+    if bm is None:                  # dense-only retrieval: still gate on both
+        bm = getattr(dn, "_gate_bm25", None)
+        if bm is None:
+            bm = dn._gate_bm25 = BM25Index(dn.chunks)
+    cos = dense_top_sim(dn, question)
+    if cos >= config.DENSE_SOLO_SIM:
+        return True
+    ok, hits = bm25_gate_ok(bm, question, with_hits=True)
+    if not ok:
+        return False
+    if cos >= config.MIN_DENSE_SIM:
+        return True
+    # a source without vectors has no dense signal: there BM25 still decides
+    covered = getattr(dn, "_gate_ids", None)
+    if covered is None:
+        covered = dn._gate_ids = {c["id"] for c in dn.chunks}
+    return hits[0][1]["id"] not in covered
 
 
 # -------------------------------------------------------------- generation --

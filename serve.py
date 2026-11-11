@@ -186,6 +186,7 @@ def import_work(col, filename, data):
     prefixes = ingest.chunk_id_prefixes(s.name for s in col.source_files())
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     n = rung = None
+    touched = []
     cut = Path(name).stem[:ingest.ID_PREFIX_LEN]
     for s in col.source_files():
         if s.name != name and Path(s.name).stem[:ingest.ID_PREFIX_LEN] != cut:
@@ -197,6 +198,7 @@ def import_work(col, filename, data):
         if r:
             ingest.record_chunked(manifest.setdefault(s.name, {}), r, now,
                                   sha, params, prefixes[s.name])
+        touched.append(s.name)
         if s.name == name:
             _, n, rung = r
     ingest.save_manifest(col, manifest)
@@ -206,23 +208,21 @@ def import_work(col, filename, data):
     dates.run_all(col)
     import quotes_bank
     quotes_bank.run_all(col)
-    # stage 2 — embed, only after chunking, if a query encoder is available
+    # stage 2 — embed (after chunking) the new source and any re-chunked
+    # sibling, with the same shared encoder and vector format as the ingest
+    # pipeline; skipped without an encoder (BM25 then covers the source).
+    # embed_source is hash-based, so unchanged siblings stay "up to date".
     embedded = False
-    try:
-        import numpy as np
-        enc = rag._query_encoder()
-        chunk_file = col.chunk_file(name)
-        chunks = [json.loads(l) for l in open(chunk_file)]
-        vecs = enc.encode([c["text"] for c in chunks],
-                          normalize_embeddings=True, show_progress_bar=False)
-        col.vectors_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(col.vectors_dir / (col.artifact_key(name) + ".npz"),
-                 vectors=np.asarray(vecs, dtype="float32"),
-                 model=np.array(config.EMBED_MODEL),
-                 src_hash=np.array(ingest.file_hash(chunk_file)))
-        embedded = True
-    except ImportError:
-        pass  # BM25 will cover it
+    for s_name in touched:
+        status, _ = ingest.embed_source(col, col.chunk_file(s_name))
+        entry = manifest.setdefault(s_name, {})
+        entry["embed_status"] = status
+        if status.startswith("embedded"):
+            entry["embedded_at"] = now
+        if s_name == name:
+            embedded = (status.startswith("embedded")
+                        or status == "up to date")
+    ingest.save_manifest(col, manifest)
 
     rt = runtime(col.id, reload=True)
     return {"work": col.work_title(name), "chunks": n, "embedded": embedded,

@@ -27,7 +27,10 @@ def test_full_flow(server, fake_llm, tmp_path):
     st, stats = server.json("GET", f"/c/{cid}/stats")
     assert st == 200 and len(stats["works"]) == len(CLEAN_FILES)
     assert stats["modes"] == ["scholar", "quotes"]
-    assert stats["retrieval"] == "BM25Index"
+    # dense-backed once an encoder can embed (M2-A); BM25 without one
+    import encoder
+    assert stats["retrieval"] == ("HybridIndex" if encoder.current_tag()
+                                  else "BM25Index")
 
     st, cols = server.json("GET", "/collections")
     assert [c["id"] for c in cols] == [cid] and cols[0]["indexed"]

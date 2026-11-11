@@ -235,7 +235,6 @@ def test_embedded_generation_serialized(monkeypatch):
 
 # ----------------------------------------------------------- M2-A encoder
 
-@xfail("P0-1", "embed stage only knows sentence-transformers")
 def test_embed_stage_uses_onnx_encoder(make_collection):
     if not (config.ONNX_ENCODER_DIR / "model.onnx").exists():
         pytest.skip("ONNX encoder not present (scripts/export_onnx.py)")

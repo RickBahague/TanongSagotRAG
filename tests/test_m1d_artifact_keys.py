@@ -51,6 +51,7 @@ def _fake_summary_and_vectors(col, key):
                         (col.vectors_dir / (key + ".summaries.npz"), summ, 1)):
         np.savez(out, vectors=np.zeros((k, 4), dtype="float32"),
                  model=np.array(config.EMBED_MODEL),
+                 pooling=np.array("cls"), max_len=np.array(512),
                  src_hash=np.array(ingest.file_hash(src)))
 
 

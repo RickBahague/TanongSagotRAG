@@ -2,6 +2,34 @@
 
 ## 2026-11-11
 
+### Bug fix — M2: dense retrieval on the ONNX path, relevance gate, eval tooling
+Milestone M2 of `implem-plan-enhancements.md` (P0-1…P0-3, P1-1), run as two
+parallel subagents plus one follow-up. `bash scripts/verify.sh M2` passes;
+measured numbers are in `plan.md` ("M2 eval").
+- **Embedding actually runs** (`encoder.py` new; `ingest.py`, `rag.py`,
+  `serve.py`, `scripts/export_onnx.py`): one shared encoder (bundled ONNX,
+  else sentence-transformers) for ingest, queries and imports. Before this,
+  linked collections were never embedded without sentence-transformers.
+- **Encoder matches the model**: CLS pooling and a 512-token limit read from
+  the model's own config files (was mean pooling at 256 tokens). Vectors are
+  tagged with pooling/max_len and re-embed when they don't match; encoding is
+  batched with per-batch progress events.
+- **Relevance gate** (`rag.py`, `config.py`): the dense branch accepted
+  every question once vectors existed (cosine ≥ 0.25 OR'd with BM25). Now
+  raw cosine with a tiered rule — accept at cosine ≥ `DENSE_SOLO_SIM` (0.72),
+  or when BM25 passes and cosine ≥ `MIN_DENSE_SIM` (0.57). 0 false accepts
+  / 0 false rejects on 150 labelled fixture+IBON questions (old rule: 95
+  false accepts). BM25-only collections unchanged.
+- **`eval.py`** rewritten: hit@1/3/k, recall@k, MRR, gate false-accepts and
+  false-rejects, `--json`, `--variants` (bm25 / hybrid / hierarchical /
+  +rerank).
+- Measured for later: 8 of 14 IBON chunks exceed the encoder's 512-token
+  limit (`CHUNK_WORDS` unchanged for now).
+- Tests: `tests/test_m2a_encoder.py`, `test_eval.py`,
+  `test_m2c_dense_gate.py`; `test_gate.py` expects the ice-cores false
+  reject only without vectors; new baseline `tests/fixtures/baselines/M2.json`
+  (162 passed).
+
 ### Bug fix — M1: index hygiene, server robustness, local-server hardening
 Milestone M1 of `implem-plan-enhancements.md` (P0-4…P0-9, P1-3 in
 `plan-enhancements.md`), run as three parallel subagents plus one follow-up.
