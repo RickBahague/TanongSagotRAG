@@ -1,0 +1,2 @@
+# Dev/test-only dependencies (never bundled).
+pytest>=8.0

@@ -1,0 +1,20 @@
+{"q": "How do worker bees build the wax comb?", "expect": "Hive Structure"}
+{"q": "When and how is honey extracted from the frames?", "expect": "Honey Harvest"}
+{"q": "Why does a bee colony swarm and how do scouts choose a new nest?", "expect": "Swarming"}
+{"q": "What happens when a colony loses its queen?", "expect": "Hive Structure"}
+{"q": "Why do stratovolcanoes erupt explosively?", "expect": "volcano"}
+{"q": "What are pyroclastic flows?", "expect": "volcano"}
+{"q": "What did Fresnel invent for lighthouses?", "expect": "Lighthouses"}
+{"q": "How do sailors identify a lighthouse at night?", "expect": "Lighthouses"}
+{"q": "How does snow turn into glacial ice?", "expect": "Glacier Formation"}
+{"q": "What landforms do retreating glaciers leave behind, such as moraines?", "expect": "Glacial Landforms"}
+{"q": "What can ice cores tell us about past climate?", "expect": "Ice Cores"}
+{"q": "Why did Newton build a reflecting telescope?", "expect": "Telescopes"}
+{"q": "What is adaptive optics?", "expect": "Telescopes"}
+{"q": "Why does a comet's ion tail point away from the Sun?", "expect": "Comets"}
+{"q": "Why do emission nebulae glow red?", "expect": "Nebulae"}
+{"q": "What is the capital of Mongolia?", "expect": null}
+{"q": "How do I file my income tax return?", "expect": null}
+{"q": "Recipe for chocolate cake", "expect": null}
+{"q": "Who won the football world cup in 2014?", "expect": null}
+{"q": "How do I configure a Kubernetes ingress controller?", "expect": null}

@@ -1,0 +1,18 @@
+{
+  "vector_files": 0,
+  "vector_keys": [],
+  "retrieval": "BM25Index",
+  "chunks": 11,
+  "questions_on_topic": 15,
+  "questions_off_topic": 5,
+  "hit@1": 0.9333333333333333,
+  "hit@3": 1.0,
+  "hit@10": 1.0,
+  "mrr": 0.9667,
+  "gate_false_accepts": 0,
+  "gate_false_rejects": 1,
+  "false_accepts": [],
+  "false_rejects": [
+    "What can ice cores tell us about past climate?"
+  ]
+}
