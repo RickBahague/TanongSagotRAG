@@ -79,8 +79,8 @@ def prune_removed(col, sources, manifest, emit):
     touched — never the sources folder, conversations/, or eval.jsonl.
     Mutates `manifest`; emits one {stage: "prune"} event per pruned source.
     Returns the list of pruned names."""
-    live = {s.name for s in sources}
-    live_keys = {col.artifact_key(s.name) for s in sources}
+    live = {col.source_name(s) for s in sources}
+    live_keys = {col.artifact_key(n) for n in live}
     data_root = col.data_dir.resolve()
     gone = {}                                  # artifact key -> [paths]
     for p, keys in col.derived_files_on_disk().items():
@@ -151,10 +151,14 @@ def migrate_layout(col, sources=None, emit=None):
         return None            # unmounted linked folder: cannot attribute
     emit = emit or (lambda **ev: None)
     sources = col.source_files() if sources is None else sources
+    # the schema-1 writer only ever saw TOP-LEVEL sources (no recursion), so
+    # only those can own a stem-keyed file
     by_stem = {}
     for s in sources:
-        by_stem.setdefault(_old_stem_key(s.name), []).append(s.name)
-    new_keys = {col.artifact_key(s.name) for s in sources}
+        name = col.source_name(s)
+        if "/" not in name:
+            by_stem.setdefault(_old_stem_key(name), []).append(name)
+    new_keys = {col.artifact_key(col.source_name(s)) for s in sources}
     data_root = col.data_dir.resolve()
     renamed = deleted = 0
     ambiguous = set()
@@ -471,7 +475,7 @@ def sections_from_pdf(col, path, meta):
     """(rung, generator of (section_title, [(page_label, text), ...]))."""
     from pypdf import PdfReader
     reader = PdfReader(str(path))
-    work = col.work_title(path.name)
+    work = col.work_title(col.source_name(path))
 
     if meta and "toc_pdf_pages" in meta:  # known book: TOC + printed-page offset
         toc = parse_toc(reader, meta["toc_pdf_pages"])
@@ -639,7 +643,8 @@ def extract_sections(col, path):
     """Dispatch on suffix → (rung, sections generator)."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return sections_from_pdf(col, path, col.source_meta.get(path.name))
+        return sections_from_pdf(col, path,
+                                 col.source_meta.get(col.source_name(path)))
     if suffix == ".md":
         return sections_from_markdown(path)
     if suffix == ".docx":
@@ -697,8 +702,9 @@ def chunk_id_prefixes(names):
 def chunk_id_prefix(col, path):
     """Chunk-id prefix of one source given the collection's current
     sources (see chunk_id_prefixes)."""
-    names = {s.name for s in col.source_files()} | {path.name}
-    return chunk_id_prefixes(names)[path.name]
+    name = col.source_name(path)
+    names = {col.source_name(s) for s in col.source_files()} | {name}
+    return chunk_id_prefixes(names)[name]
 
 
 def chunk_is_current(col, path, prev, src_sha256=None, params=None,
@@ -707,8 +713,9 @@ def chunk_is_current(col, path, prev, src_sha256=None, params=None,
     manifest entry `prev` records this exact source sha256, the current
     chunk params and the current chunk-id prefix (entries written before
     the prefix was recorded used the cut stem). mtimes are never consulted."""
-    if not (col.chunk_file(path.name).exists()
-            and (col.paras_dir / (col.artifact_key(path.name)
+    name = col.source_name(path)
+    if not (col.chunk_file(name).exists()
+            and (col.paras_dir / (col.artifact_key(name)
                                   + ".json")).exists()):
         return False
     if not prev:
@@ -734,7 +741,8 @@ def chunk_source(col, path, force=False, *, prev=None, src_sha256=None,
     (chunk_id_prefixes) is computed from the collection's sources when not
     given. Returns (chunk_file, n_chunks, segmentation_rung) or None if
     skipped."""
-    key = col.artifact_key(path.name)
+    name = col.source_name(path)
+    key = col.artifact_key(name)
     out = col.chunks_dir / (key + ".jsonl")
     para_out = col.paras_dir / (key + ".json")
     if id_prefix is None:
@@ -750,7 +758,8 @@ def chunk_source(col, path, force=False, *, prev=None, src_sha256=None,
     params = chunk_params(col)
     chunk_w, overlap_w = params["chunk_words"], params["overlap_words"]
     seen_titles = set()
-    with open(out, "w") as f:
+    tmp = out.with_name(out.name + ".tmp")
+    with open(tmp, "w") as f:
         for raw_title, pages in sections:
             # repeated titles within a source stay distinct: 'X', 'X (2)', …
             title = _unique_titles(seen_titles, raw_title)
@@ -775,12 +784,13 @@ def chunk_source(col, path, force=False, *, prev=None, src_sha256=None,
                     "page_start": word_pages[start],
                     "page_end": word_pages[min(start + len(ck) - 1,
                                                len(word_pages) - 1)],
-                    "source": path.name,
+                    "source": name,
                 }, ensure_ascii=False) + "\n")
                 rel = sorted(p - start for p in paras if start < p < start + len(ck))
                 if rel:
                     para_map[cid] = rel
                 n += 1
+    os.replace(tmp, out)
     para_out.write_text(json.dumps(para_map))
     return out, n, rung
 
@@ -797,7 +807,8 @@ def detect_source_meta(col, path):
     """Fill in source_meta for a new source: title (PDF metadata → first
     heading → prettified filename) and a plausible years range (regex over
     title + filename). Never overwrites user-edited values."""
-    if path.name in col.source_meta and col.source_meta[path.name].get("title"):
+    name = col.source_name(path)
+    if name in col.source_meta and col.source_meta[name].get("title"):
         return
     title = None
     if path.suffix.lower() == ".pdf":
@@ -812,8 +823,8 @@ def detect_source_meta(col, path):
             pass
     title = title or _prettify(path.stem)
     years = [int(y) for y in re.findall(r"\b(19[0-9]{2}|20[0-9]{2})\b",
-                                        title + " " + path.name)]
-    col.set_source_meta(path.name, title=title,
+                                        title + " " + name)]
+    col.set_source_meta(name, title=title,
                         years=[min(years), max(years)] if years else None)
 
 
@@ -922,20 +933,90 @@ def record_chunked(entry, res, now, src_sha256, params, id_prefix):
                   "src_sha256": src_sha256, "chunk_params": params,
                   "id_prefix": id_prefix})
     entry.pop("error", None)
+    if n == 0:
+        entry["no_text"] = True       # e.g. a scanned / image-only PDF
+    else:
+        entry.pop("no_text", None)
 
 
-def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
+class Cancelled(Exception):
+    """run_pipeline stopped because its `cancel` callback returned True."""
+
+
+def _fix_nested_manifest_keys(col, manifest, names):
+    """summarize.run_all maps a chunk file's artifact key back to a source
+    by top-level file NAME; for a source in a subfolder that lookup misses
+    and the entry lands under the artifact key. Fold such entries back into
+    the source's own entry."""
+    for name in names:
+        key = col.artifact_key(name)
+        if key != name and key in manifest and key not in names:
+            manifest.setdefault(name, {}).update(manifest.pop(key))
+
+
+def remove_source(col, name):
+    """Delete one MANAGED source: its file, every derived artifact
+    (Collection.derived_paths) and its manifest + source_meta entries.
+    Linked collections are refused (PermissionError) — the user's folder is
+    never written to. KeyError when no such source exists. Returns
+    {"source", "deleted"} (number of derived files removed)."""
+    if col.linked:
+        raise PermissionError(
+            f"This collection links your folder {col.sources_dir} — AnyRAG "
+            f"never deletes files there. Remove or move the file in that "
+            f"folder yourself, then Rescan.")
+    path = col.source_path(name)
+    if path is None:
+        raise KeyError(name)
+    name = col.source_name(path)
+    data_root = col.data_dir.resolve()
+    path.unlink()
+    deleted = 0
+    for p in col.derived_paths(name):
+        if p.exists() and data_root in p.resolve().parents:
+            p.unlink()
+            deleted += 1
+    manifest = load_manifest(col)
+    if manifest.pop(name, None) is not None or col.manifest_file.exists():
+        save_manifest(col, manifest)
+    if col.source_meta.pop(name, None) is not None:
+        col.save()
+    return {"source": name, "deleted": deleted}
+
+
+def run_pipeline(col, force=False, summaries=True, progress=None, workers=None,
+                 cancel=None, only=None):
     """The whole pipeline for one collection. `progress` is an optional
-    callable receiving {stage, source, status, i, total, …} events (the
-    server streams them as NDJSON; the CLI prints them). `workers` limits
-    the chunk-stage process pool (server passes 1 — threads inside a
-    request must not fork)."""
+    callable receiving {stage, source, status, …} events (the server streams
+    them as NDJSON; the CLI prints them). `workers` limits the chunk-stage
+    process pool (server passes 1 — threads inside a request must not fork).
+
+    Progress counts: chunk/summarize events carry done/total = sources
+    finished / sources in that stage; embed events carry done/total =
+    items (chunks + summaries) embedded for the CURRENT source plus i/of =
+    that source's position / sources to embed; dates/quotes 1/1.
+
+    `cancel`: optional callable; when it returns True the run stops
+    cooperatively — checked between sources in every stage and between
+    embedding batches — by raising Cancelled. Data stays consistent: a
+    source's manifest entry is only updated after its stage finished, chunk
+    and vector files are written to a temp name then renamed, and a
+    half-summarized source keeps its "partial" marker, so nothing
+    interrupted is ever treated as complete; the next run redoes it.
+
+    `only`: a source name (Collection.source_name) — re-ingest just that
+    source (forced: re-chunked, re-summarized, re-embedded); other sources
+    are not touched. KeyError if it is not a source of the collection."""
     def emit(**ev):
         if progress:
             progress(ev)
         else:
             src = ev.get("source", "")
             print(f"[{ev['stage']}] {src}: {ev.get('status', '')}")
+
+    def check():
+        if cancel is not None and cancel():
+            raise Cancelled()
 
     col.ensure_dirs()
     if not col.sources_dir.is_dir():
@@ -944,6 +1025,11 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
              f"{col.sources_dir}")
         return {"chunks": 0, "sources": 0}
     sources = col.source_files()
+    names = {s: col.source_name(s) for s in sources}
+    if only is not None:
+        target = col.source_path(only)
+        if target is None:
+            raise KeyError(only)
     # schema-1 (stem-keyed) layout → rename to full-filename keys BEFORE the
     # prune, which would otherwise see the old names as orphans
     migrate_layout(col, sources, emit)
@@ -960,6 +1046,8 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
         return {"chunks": 0, "sources": 0}
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    targets = [target] if only is not None else list(sources)
+    force_chunk = force or only is not None
 
     # Stage 1 — chunk every new/changed source FIRST. Sources are
     # independent; a process pool when we may fork, else serial.
@@ -967,47 +1055,77 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
     # in the manifest.
     if workers is None:
         workers = config.INGEST_WORKERS or max((os.cpu_count() or 2) // 2, 1)
-    jobs = list(sources)
+    jobs = targets
     params = chunk_params(col)
-    shas = {src.name: file_hash(src) for src in jobs}
-    prefixes = chunk_id_prefixes(src.name for src in jobs)
+    shas = {names[src]: file_hash(src) for src in jobs}
+    prefixes = chunk_id_prefixes(names.values())
+    done = {"n": 0}
 
     def job_kw(src):
-        return {"prev": manifest.get(src.name), "src_sha256": shas[src.name],
-                "id_prefix": prefixes[src.name]}
+        n = names[src]
+        return {"prev": manifest.get(n), "src_sha256": shas[n],
+                "id_prefix": prefixes[n]}
 
     def record(src, res):
-        entry = manifest.setdefault(src.name, {})
+        name = names[src]
+        entry = manifest.setdefault(name, {})
+        done["n"] += 1
         if res:
             _, n, rung = res
-            record_chunked(entry, res, now, shas[src.name], params,
-                           prefixes[src.name])
-            emit(stage="chunk", source=src.name, status=f"{n} chunks "
-                 f"(segmentation: {rung})", n=n, total=len(jobs))
+            record_chunked(entry, res, now, shas[name], params,
+                           prefixes[name])
+            status = f"{n} chunks (segmentation: {rung})"
+            if n == 0:
+                status = ("no extractable text — a scanned or image-only "
+                          "PDF needs OCR first" if src.suffix.lower() ==
+                          ".pdf" else "no text found")
+            emit(stage="chunk", source=name, status=status, n=n,
+                 done=done["n"], total=len(jobs),
+                 **({"no_text": True} if n == 0 else {}))
         else:
-            emit(stage="chunk", source=src.name, status="up to date",
-                 total=len(jobs))
+            emit(stage="chunk", source=name, status="up to date",
+                 done=done["n"], total=len(jobs))
         save_manifest(col, manifest)
 
+    def failed(src, e):
+        name = names[src]
+        done["n"] += 1
+        emit(stage="chunk", source=name, status=f"FAILED: {e}",
+             error=str(e), done=done["n"], total=len(jobs))
+        manifest.setdefault(name, {})["error"] = str(e)
+        save_manifest(col, manifest)
+
+    check()
     if workers > 1 and len(jobs) > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
         with ProcessPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
-            futures = {pool.submit(chunk_source, col, src, force,
+            futures = {pool.submit(chunk_source, col, src, force_chunk,
                                    **job_kw(src)): src
                        for src in jobs}
-            for fut in as_completed(futures):
-                record(futures[fut], fut.result())
+            try:
+                for fut in as_completed(futures):
+                    try:
+                        res = fut.result()
+                    except Exception as e:
+                        failed(futures[fut], e)
+                        continue
+                    record(futures[fut], res)
+                    check()
+            except Cancelled:
+                for f in futures:
+                    f.cancel()
+                raise
     else:
         for src in jobs:
+            check()
             try:
-                record(src, chunk_source(col, src, force, **job_kw(src)))
+                record(src, chunk_source(col, src, force_chunk,
+                                         **job_kw(src)))
             except Exception as e:
-                emit(stage="chunk", source=src.name, status=f"FAILED: {e}")
-                manifest.setdefault(src.name, {})["error"] = str(e)
-                save_manifest(col, manifest)
+                failed(src, e)
 
     # metadata auto-detection for sources the user hasn't titled yet
-    for src in sources:
+    for src in targets:
         try:
             detect_source_meta(col, src)
         except Exception:
@@ -1015,44 +1133,87 @@ def run_pipeline(col, force=False, summaries=True, progress=None, workers=None):
 
     # Stage 1c/1d — per-section dates + quotable-passage bank
     # (cheap regex sidecars; hash-idempotent)
+    check()
     import dates
     dates.run_all(col, force)
-    emit(stage="dates", status="done")
+    emit(stage="dates", status="done", done=1, total=1)
+    check()
     import quotes_bank
     quotes_bank.run_all(col, force)
-    emit(stage="quotes", status="done")
+    emit(stage="quotes", status="done", done=1, total=1)
 
     # Stage 1b — summarize (generated like chunks, BEFORE any embedding);
     # reads only the completed chunk files written above
+    live_names = set(names.values())
+
+    def save_summ(m):
+        _fix_nested_manifest_keys(col, m, live_names)
+        save_manifest(col, m)
+
     if summaries:
+        check()
         import summarize
-        ok = summarize.run_all(col, force, manifest,
-                               lambda m: save_manifest(col, m),
-                               progress=progress)
+        if only is not None:
+            ok = summarize.llm_reachable()
+            name = names[target]
+            if ok and col.chunk_file(name).exists():
+                n = summarize.summarize_source(col, col.chunk_file(name),
+                                               True)
+                status = "up to date" if n is None else \
+                    f"{n} section summaries"
+                entry = manifest.setdefault(name, {})
+                entry["summary_status"] = status
+                if n is not None:
+                    entry["summarized_at"] = now
+                save_manifest(col, manifest)
+                emit(stage="summarize", source=name, status=status,
+                     done=1, total=1)
+        else:
+            n_files = len(list(col.chunks_dir.glob("*.jsonl")))
+            seen = {"n": 0}
+
+            def summ_progress(ev):
+                seen["n"] += 1
+                if progress:
+                    progress(dict(ev, done=seen["n"], total=n_files))
+                check()
+
+            ok = summarize.run_all(col, force, manifest, save_summ,
+                                   progress=summ_progress)
+            _fix_nested_manifest_keys(col, manifest, live_names)
         emit(stage="summarize", status="done" if ok else
              "skipped (LLM unreachable)")
 
     # Stage 2 — embed only sources whose chunking is complete
     shared = {}          # one embedding model for the whole run
-    for src in sources:
-        chunk_file = col.chunk_file(src.name)
+    force_embed = force or only is not None
+    for i, src in enumerate(targets, start=1):
+        check()
+        name = names[src]
+        chunk_file = col.chunk_file(name)
         if not chunk_file.exists():
-            emit(stage="embed", source=src.name, status="NOT chunked, skipping")
+            emit(stage="embed", source=name, status="NOT chunked, skipping",
+                 i=i, of=len(targets))
             continue
-        def embed_progress(done, n, name=src.name):
-            emit(stage="embed", source=name, done=done, total=n,
-                 status=f"embedding {done}/{n}")
-        status, shared = embed_source(col, chunk_file, force, shared,
+
+        def embed_progress(done_, n, name=name, i=i):
+            emit(stage="embed", source=name, done=done_, total=n,
+                 i=i, of=len(targets), status=f"embedding {done_}/{n}")
+            check()
+        status, shared = embed_source(col, chunk_file, force_embed, shared,
                                       progress=embed_progress)
-        entry = manifest.setdefault(src.name, {})
+        entry = manifest.setdefault(name, {})
         entry["embed_status"] = status
         entry["embedded_at"] = now if "embedded" in status else \
             entry.get("embedded_at")
-        emit(stage="embed", source=src.name, status=status)
+        emit(stage="embed", source=name, status=status, i=i, of=len(targets))
         save_manifest(col, manifest)
 
-    total = sum(m.get("n_chunks", 0) for m in manifest.values())
-    emit(stage="done", status=f"{len(sources)} source(s), {total} chunks")
+    total = sum(m.get("n_chunks", 0) for k, m in manifest.items()
+                if k in live_names)
+    label = (f"re-ingested {names[target]}; " if only is not None else "")
+    emit(stage="done", status=f"{label}{len(sources)} source(s), "
+         f"{total} chunks")
     return {"chunks": total, "sources": len(sources)}
 
 

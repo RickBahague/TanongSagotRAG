@@ -2,6 +2,35 @@
 
 ## 2026-11-12
 
+### Feature — M4: settings, source management, background ingest, chat UX
+Milestone M4 of `implem-plan-enhancements.md` (P3-1…P3-5), run as a backend
+subagent then a UI subagent. `bash scripts/verify.sh M4` passes; fixture
+eval identical to M3.
+- **Settings** (`config.py`, `serve.py`, `library.py`, `rag.py`):
+  `GET|POST /settings` and `/c/<id>/settings` validated against one
+  allow-list (`config.SETTINGS_SCHEMA`, types/ranges, null resets),
+  applied without restart through `config.get()`; `GET /backend/status`
+  (reachability, model presence, Ollama model list, 2 s timeouts).
+- **Collections and sources** (`serve.py`, `library.py`, `ingest.py`,
+  `summarize.py`): `PATCH /c/<id>`; `DELETE /c/<id>/source/<name>`
+  (managed only — linked folders are never written); single-source
+  re-ingest; recursive linked-folder scan with ignore patterns, nested
+  sources keyed by relative path; per-source `error`/`no_text` in `/stats`;
+  sizes in `/collections`.
+- **Background ingest** (`serve.py`, `ingest.py`): one job per collection,
+  per-stage done/total, `/ingest/status`, `/ingest/cancel` (cooperative,
+  interrupted sources redone next run), second clients re-attach with a
+  replay of events.
+- **UI** (`static/index.html`, `app.py`): settings panel with Test
+  connection and Ollama model dropdown; edit-collection form and
+  per-collection tuning; remove/re-ingest buttons and error/no-text badges;
+  progress bar with Cancel and re-attach; safe Markdown rendering of
+  answers (DOM only, http/https links only); Stop button; Copy answer;
+  native folder picker in the desktop window.
+- Tests: `tests/test_m4a_settings.py`, `test_m4a_sources.py`,
+  `test_m4a_jobs.py` (220 passed); baseline
+  `tests/fixtures/baselines/M4.json`.
+
 ### Feature — M3: follow-up questions, numbered citations, per-collection tuning
 Milestone M3 of `implem-plan-enhancements.md` (P2-1, P2-2, P2-8), run as a
 backend subagent then a UI subagent. `bash scripts/verify.sh M3` passes;

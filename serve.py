@@ -3,15 +3,28 @@
 
 All corpus routes are collection-scoped under /c/<id>/…:
 
-  GET    /collections               [{id, name, sources, chunks, …}]
+  GET    /collections               [{id, name, sources, size_bytes, …}]
   POST   /collections               {name, link?, description?, author?,
                                      persona?} → create
   DELETE /collections/<id>          remove collection + derived data
+  GET    /settings                  global settings: effective values,
+  POST   /settings                  defaults, overrides, allow-list
+                                     ({KEY: value|null}; null = remove)
+  GET    /backend/status            LLM backend reachability / models
+  PATCH  /c/<id>                    {name?, description?, author?, persona?}
+  GET    /c/<id>/settings           per-collection settings (same shape)
+  POST   /c/<id>/settings           {KEY: value|null}
   GET    /c/<id>/stats              capabilities + per-source table
   POST   /c/<id>/ask                NDJSON stream: meta, delta…, then
                                      verify (quotes) or citations
                                      (scholar/persona), done
-  POST   /c/<id>/ingest             (re)ingest; NDJSON progress events
+  POST   /c/<id>/ingest             start (or attach to) the collection's
+                                     background ingest job; NDJSON view of
+                                     its events (?force=1 ?summaries=0
+                                     ?source=<name> ?from=<event index>)
+  GET    /c/<id>/ingest/status      job state + per-stage done/total
+  POST   /c/<id>/ingest/cancel      cooperative cancel
+  DELETE /c/<id>/source/<name>      remove a MANAGED source + its artifacts
   POST   /c/<id>/import             file upload (X-Filename header)
   GET    /c/<id>/passage?id=…       windowed/full stitched passage (reader)
   GET    /c/<id>/read?id=…          full-section reader page
@@ -32,12 +45,15 @@ import hmac
 import json
 import re
 import threading
+import time
 import urllib.error
+import urllib.request
+import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 import config
 import conversations
@@ -51,7 +67,8 @@ MAX_RUNTIMES = 3
 MAX_JSON_BODY = 10 * 1024 * 1024       # JSON POST bodies
 MAX_UPLOAD = 200 * 1024 * 1024          # /import raw uploads
 # POST routes whose body is NOT JSON (exempt from the Content-Type rule)
-_NON_JSON_POSTS = ("/ingest", "/import")
+_NON_JSON_POSTS = ("/ingest", "/import", "/ingest/cancel")
+BACKEND_TIMEOUT = 2.0                   # /backend/status probe (seconds)
 
 # rag.load_sources raises errors.NotIndexed for a collection with no chunks
 # (older rag.py raised SystemExit); both mean "not indexed" to the server.
@@ -61,6 +78,8 @@ _RUNTIMES = OrderedDict()      # collection id → rag.Runtime (LRU, max 3)
 _RUNTIME_LOCK = threading.Lock()  # guards _RUNTIMES/_LOAD_LOCKS only (fast)
 _LOAD_LOCKS = {}               # collection id → Lock held while loading it
 _INGEST_LOCK = threading.Lock()   # one ingest at a time (embed/LLM heavy)
+_JOBS = {}                     # collection id → latest IngestJob
+_JOBS_LOCK = threading.Lock()
 
 
 def not_indexed_msg(cid):
@@ -106,6 +125,283 @@ def forget_runtime(cid):
     with _RUNTIME_LOCK:
         _RUNTIMES.pop(cid, None)
         _LOAD_LOCKS.pop(cid, None)
+
+
+def forget_all_runtimes():
+    """Drop every loaded runtime (after a global settings change: the next
+    request rebuilds each index with the new values)."""
+    with _RUNTIME_LOCK:
+        _RUNTIMES.clear()
+
+
+# ------------------------------------------------------------ ingest jobs --
+
+class IngestJob:
+    """One background ingest run of one collection (P3-4). Events from
+    ingest.run_pipeline are appended to `events` (never dropped); any number
+    of HTTP clients follow them (follow()), so closing a tab does not stop
+    the run and a second tab can attach. The final event is always one of
+    stage "complete", "error" or "cancelled"."""
+
+    FINAL = ("complete", "error", "cancelled")
+
+    def __init__(self, col, force=False, summaries=True, only=None):
+        self.id = uuid.uuid4().hex[:12]
+        self.col = col
+        self.force, self.summaries, self.only = force, summaries, only
+        self.events = []
+        self.cond = threading.Condition()
+        self.cancel_event = threading.Event()
+        self.state = "running"
+        self.stage = self.source = None
+        self.done = self.total = None
+        self.stages = {}
+        self.clients = 0               # streams currently following
+        self.result = self.error = None
+        self.started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.finished = None
+        self.thread = threading.Thread(target=self._run, daemon=True,
+                                       name=f"ingest-{col.id}")
+
+    @property
+    def running(self):
+        return self.state in ("running", "queued")
+
+    def emit(self, ev):
+        with self.cond:
+            self.events.append(ev)
+            st = ev.get("stage")
+            self.stage = st
+            self.source = ev.get("source") or None
+            self.done, self.total = ev.get("done"), ev.get("total")
+            if st == "embed" and "i" in ev:
+                # stage-level count = sources: the batch events of source i
+                # mean i-1 sources are finished, its final event i
+                fin = "done" not in ev
+                self.stages["embed"] = {"done": ev["i"] - (0 if fin else 1),
+                                        "total": ev["of"]}
+            elif st in ("chunk", "summarize", "dates", "quotes") \
+                    and ev.get("total") is not None \
+                    and ev.get("done") is not None:
+                self.stages[st] = {"done": ev["done"], "total": ev["total"]}
+            self.cond.notify_all()
+
+    def _finish(self, state, ev):
+        self.emit(ev)
+        with self.cond:
+            self.state = state
+            self.finished = datetime.now(timezone.utc).isoformat(
+                timespec="seconds")
+            self.cond.notify_all()
+
+    def _run(self):
+        import ingest
+        col = self.col
+        if not _INGEST_LOCK.acquire(blocking=False):
+            self.state = "queued"
+            self.emit({"stage": "queued", "status": "waiting for another "
+                       "collection's ingest to finish"})
+            while not _INGEST_LOCK.acquire(timeout=0.25):
+                if self.cancel_event.is_set():
+                    return self._finish("cancelled", {
+                        "stage": "cancelled",
+                        "status": "ingest cancelled before it started"})
+            self.state = "running"
+        try:
+            res = ingest.run_pipeline(
+                col, force=self.force, summaries=self.summaries,
+                progress=self.emit, workers=1,
+                cancel=self.cancel_event.is_set, only=self.only)
+            try:
+                runtime(col.id, reload=True)
+            except NOT_INDEXED:          # no chunks produced
+                self.error = not_indexed_msg(col.id)
+                return self._finish("error", {
+                    "stage": "error", "error": self.error,
+                    "status": "no passages were produced — " + self.error})
+            self.result = res
+            self._finish("complete", {"stage": "complete", **res})
+        except ingest.Cancelled:
+            try:                         # serve what is on disk now
+                runtime(col.id, reload=True)
+            except BaseException:
+                forget_runtime(col.id)
+            self._finish("cancelled", {
+                "stage": "cancelled",
+                "status": "ingest cancelled — finished sources are kept; "
+                          "the rest is redone on the next ingest"})
+        except Exception as e:
+            self.error = str(e)
+            self._finish("error", {"stage": "error", "status": str(e),
+                                   "error": str(e)})
+        finally:
+            _INGEST_LOCK.release()
+
+    def follow(self, start=0):
+        """Yield events from index `start` on, live, until the job ends."""
+        i = max(start, 0)
+        with self.cond:
+            self.clients += 1
+        try:
+            while True:
+                with self.cond:
+                    while i >= len(self.events) and self.running:
+                        self.cond.wait(timeout=1.0)
+                    batch = self.events[i:]
+                    ended = not self.running
+                for ev in batch:
+                    yield ev
+                i += len(batch)
+                if ended and i >= len(self.events):
+                    return
+        finally:
+            with self.cond:
+                self.clients -= 1
+
+    def status(self):
+        with self.cond:
+            return {"job": self.id, "state": self.state,
+                    "running": self.running,
+                    "cancel_requested": self.cancel_event.is_set(),
+                    "stage": self.stage, "source": self.source,
+                    "done": self.done, "total": self.total,
+                    "stages": {k: dict(v) for k, v in self.stages.items()},
+                    "force": self.force, "summaries": self.summaries,
+                    "only": self.only, "started": self.started,
+                    "finished": self.finished, "events": len(self.events),
+                    "clients": self.clients,
+                    "result": self.result, "error": self.error,
+                    "last": self.events[-1] if self.events else None}
+
+
+def start_ingest(col, force=False, summaries=True, only=None):
+    """(job, attached): the collection's running job when there is one
+    (attached=True — the new request's options are ignored), else a newly
+    started job."""
+    with _JOBS_LOCK:
+        job = _JOBS.get(col.id)
+        if job is not None and job.running:
+            return job, True
+        job = IngestJob(col, force=force, summaries=summaries, only=only)
+        _JOBS[col.id] = job
+        job.thread.start()
+        return job, False
+
+
+def running_job(cid):
+    with _JOBS_LOCK:
+        job = _JOBS.get(cid)
+    return job if job is not None and job.running else None
+
+
+def ingest_status(cid):
+    with _JOBS_LOCK:
+        job = _JOBS.get(cid)
+    if job is None:
+        return {"job": None, "state": "idle", "running": False}
+    return job.status()
+
+
+# --------------------------------------------------------- backend status --
+
+def backend_status(backend=None, url=None, model=None, model_path=None,
+                   timeout=BACKEND_TIMEOUT):
+    """Can the configured (or given) LLM backend answer? Never blocks longer
+    than ~`timeout` per probe. Returns {backend, url, model, reachable,
+    model_present (bool|None = unknown), models (list|None), error}; for
+    "embedded" also {model_path, file_exists, llama_cpp}."""
+    backend = backend or config.get("LLM_BACKEND")
+    url = (url or config.get("LLM_URL") or "").rstrip("/")
+    model = model or config.get("LLM_MODEL")
+    out = {"backend": backend, "url": url, "model": model,
+           "reachable": False, "model_present": None, "models": None,
+           "error": None}
+    if backend == "embedded":
+        import importlib.util
+        path = Path(model_path or config.get("LLM_MODEL_PATH"))
+        exists = path.is_file()
+        has_lib = importlib.util.find_spec("llama_cpp") is not None
+        out.update(url=None, model=path.name, model_path=str(path),
+                   file_exists=exists, llama_cpp=has_lib,
+                   model_present=exists, reachable=exists and has_lib)
+        if not exists:
+            out["error"] = f"model file missing: {path}"
+        elif not has_lib:
+            out["error"] = ("llama-cpp-python is not installed "
+                            "(pip install llama-cpp-python)")
+        return out
+    if backend not in ("ollama", "openai"):
+        out["error"] = f"unknown backend {backend!r}"
+        return out
+    if not re.match(r"^https?://", url):
+        out["error"] = f"invalid URL {url!r}"
+        return out
+    probe = url + ("/api/tags" if backend == "ollama" else "/models")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(probe, timeout=timeout) as r:
+            data = json.loads(r.read(4 * 1024 * 1024) or b"{}")
+        out["reachable"] = True
+        if backend == "ollama":
+            names = [m.get("name") or m.get("model")
+                     for m in data.get("models") or [] if isinstance(m, dict)]
+        else:
+            names = [m.get("id") for m in data.get("data") or []
+                     if isinstance(m, dict)]
+        names = sorted(n for n in names if isinstance(n, str))
+        out["models"] = names
+        if backend == "ollama":
+            out["model_present"] = (model in names or (
+                ":" not in model and f"{model}:latest" in names))
+        else:
+            out["model_present"] = (model in names) if names else None
+    except urllib.error.HTTPError as e:
+        out["reachable"] = True          # a server answered, just not this
+        out["error"] = f"{probe} answered HTTP {e.code}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        reason = getattr(e, "reason", e)
+        out["error"] = f"cannot reach {backend} at {url}: {reason}"
+    if out["reachable"] and out["model_present"] is False:
+        out["error"] = f"model {model!r} is not available on the server" + (
+            f" — run: ollama pull {model}" if backend == "ollama" else "")
+    return out
+
+
+# --------------------------------------------------------------- settings --
+
+def global_settings():
+    keys = config.SETTINGS_SCHEMA
+    overrides = config.user_overrides()
+    eff = {k: config.get(k) for k in keys}
+    defaults = {k: config.default_value(k) for k in keys}
+    return {"backend": config.get("LLM_BACKEND"),
+            "model": config.get("LLM_MODEL"), "url": config.get("LLM_URL"),
+            "retrieval": config.get("RETRIEVAL"),
+            "embed_model": config.get("EMBED_MODEL"),
+            "file": str(config.SETTINGS_FILE),
+            "overrides": overrides,
+            "settings": config.describe_settings(eff, overrides, defaults)}
+
+
+def collection_settings(col):
+    overrides = col.overrides()
+    keys = config.SETTINGS_SCHEMA
+    defaults = {k: config.get(k) for k in keys}
+    eff = dict(defaults, **overrides)
+    return {"id": col.id, "overrides": overrides,
+            "settings": config.describe_settings(eff, overrides, defaults,
+                                                 scope="collection")}
+
+
+def _settings_error(errors):
+    return {"error": "invalid settings: " + "; ".join(
+        f"{k}: {m}" for k, m in sorted(errors.items())), "errors": errors}
+
+
+def collection_summary(col):
+    return {"id": col.id, "name": col.name, "description": col.description,
+            "author": col.author, "persona": col.meta.get("persona"),
+            "linked": col.linked, "folder": str(col.sources_dir)}
 
 
 READ_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -185,23 +481,25 @@ def import_work(col, filename, data):
     # ingest sees them as up to date.
     manifest = ingest.load_manifest(col)
     params = ingest.chunk_params(col)
-    prefixes = ingest.chunk_id_prefixes(s.name for s in col.source_files())
+    prefixes = ingest.chunk_id_prefixes(col.source_name(s)
+                                        for s in col.source_files())
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     n = rung = None
     touched = []
     cut = Path(name).stem[:ingest.ID_PREFIX_LEN]
     for s in col.source_files():
-        if s.name != name and Path(s.name).stem[:ingest.ID_PREFIX_LEN] != cut:
+        sn = col.source_name(s)
+        if sn != name and Path(sn).stem[:ingest.ID_PREFIX_LEN] != cut:
             continue                         # unrelated source: untouched
         sha = ingest.file_hash(s)
-        r = ingest.chunk_source(col, s, force=(s.name == name),
-                                prev=manifest.get(s.name), src_sha256=sha,
-                                id_prefix=prefixes[s.name])
+        r = ingest.chunk_source(col, s, force=(sn == name),
+                                prev=manifest.get(sn), src_sha256=sha,
+                                id_prefix=prefixes[sn])
         if r:
-            ingest.record_chunked(manifest.setdefault(s.name, {}), r, now,
-                                  sha, params, prefixes[s.name])
-        touched.append(s.name)
-        if s.name == name:
+            ingest.record_chunked(manifest.setdefault(sn, {}), r, now,
+                                  sha, params, prefixes[sn])
+        touched.append(sn)
+        if sn == name:
             _, n, rung = r
     ingest.save_manifest(col, manifest)
     ingest.detect_source_meta(col, src)
@@ -241,11 +539,18 @@ def collection_stats(rt):
         s = sources.setdefault(c["source"], {"chunks": 0, "essays": set()})
         s["chunks"] += 1
         s["essays"].add(c["essay"])
+    # sources with no passages (failed, text-less, not yet chunked) are
+    # listed too, so their error / no_text flags reach the UI
+    for p in col.source_files():
+        sources.setdefault(col.source_name(p), {"chunks": 0,
+                                                 "essays": set()})
     works = [{"source": name, "title": col.work_title(name),
               "years": (col.source_meta.get(name, {}) or {}).get("years"),
               "chunks": s["chunks"], "essays": len(s["essays"]),
               "segmentation": manifest.get(name, {}).get("segmentation"),
-              "embed_status": manifest.get(name, {}).get("embed_status")}
+              "embed_status": manifest.get(name, {}).get("embed_status"),
+              "error": manifest.get(name, {}).get("error"),
+              "no_text": bool(manifest.get(name, {}).get("no_text"))}
              for name, s in sorted(sources.items())]
     dated = sum(1 for c in rt.index.chunks
                 if c.get("date") and c.get("date_precision") != "work")
@@ -260,7 +565,8 @@ def collection_stats(rt):
             "has_quotes": bool(rt.quote_bank),
             "date_coverage": round(date_coverage, 3),
             "show_timeline": date_coverage >= 0.4,
-            "backend": config.LLM_BACKEND, "model": config.LLM_MODEL}
+            "backend": config.get("LLM_BACKEND"),
+            "model": config.get("LLM_MODEL")}
 
 
 def timeline(rt):
@@ -308,7 +614,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         for k, v in headers:
             self.send_header(k, v)
-        if code >= 400 and self.command in ("POST", "PUT", "DELETE"):
+        if code >= 400 and self.command in ("POST", "PUT", "PATCH",
+                                            "DELETE"):
             # the request body may be unread: never reuse this connection
             self.send_header("Connection", "close")
             self.close_connection = True
@@ -451,12 +758,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._guarded(self._do_DELETE)
 
+    def do_PATCH(self):
+        self._guarded(self._do_PATCH)
+
     # ------------------------------------------------------------------ GET
     def _do_GET(self):
         cid, path, qs = self._route()
         try:
             if cid is None:
-                return self._get_global(path)
+                return self._get_global(path, qs)
+            if path == "/settings":          # no index needed
+                return self._json(collection_settings(library.get(cid)))
+            if path == "/ingest/status":
+                library.get(cid)
+                return self._json(ingest_status(cid))
             rt = runtime(cid)
         except KeyError:
             return self._err(404, "unknown collection")
@@ -467,25 +782,31 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._err(400, str(e))
 
-    def _get_global(self, path):
+    def _get_global(self, path, qs=None):
         if path in ("/", "/index.html"):
             self._send(200, INDEX_HTML_FILE.read_bytes(),
                        "text/html; charset=utf-8")
         elif path == "/collections":
             out = []
             for col in library.list_all():
+                files = col.source_files()
                 out.append({"id": col.id, "name": col.name,
-                            "author": col.author, "linked": col.linked,
+                            "author": col.author,
+                            "description": col.description,
+                            "linked": col.linked,
                             "folder": str(col.sources_dir),
-                            "sources": len(col.source_files()),
+                            "sources": len(files),
                             "indexed": col.chunks_dir.exists() and
-                            any(col.chunks_dir.glob("*.jsonl"))})
+                            any(col.chunks_dir.glob("*.jsonl")),
+                            "ingesting": running_job(col.id) is not None,
+                            **col.disk_usage(files)})
             self._json(out)
         elif path == "/settings":
-            self._json({"backend": config.LLM_BACKEND,
-                        "model": config.LLM_MODEL, "url": config.LLM_URL,
-                        "retrieval": config.RETRIEVAL,
-                        "embed_model": config.EMBED_MODEL})
+            self._json(global_settings())
+        elif path == "/backend/status":
+            q = {k: (qs or {}).get(k, [None])[0]
+                 for k in ("backend", "url", "model", "model_path")}
+            self._json(backend_status(**q))
         else:
             self._err(404, "not found")
 
@@ -563,10 +884,15 @@ class Handler(BaseHTTPRequestHandler):
                 m = re.match(r"^/collections/([\w-]+)$", path)
                 if not m:
                     return self._err(404, "not found")
+                if running_job(m.group(1)):
+                    return self._err(409, "an ingest is running for this "
+                                          "collection — cancel it first")
                 forget_runtime(m.group(1))
                 library.delete(m.group(1))
                 return self._json({"ok": True})
             col = library.get(cid)
+            if path.startswith("/source/"):
+                return self._delete_source(col, unquote(path[len("/source/"):]))
             if path.startswith("/conversation/"):
                 conversations.delete(col, path.split("/")[2])
                 return self._json({"ok": True})
@@ -574,12 +900,55 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, ValueError) as e:
             self._err(400, str(e))
 
+    def _delete_source(self, col, name):
+        import ingest
+        if col.linked:
+            return self._err(409, f"This collection links your folder "
+                             f"{col.sources_dir} — AnyRAG never deletes "
+                             f"files there. Remove or move the file in that "
+                             f"folder yourself, then Rescan.")
+        if running_job(col.id):
+            return self._err(409, "an ingest is running for this collection "
+                                  "— wait for it or cancel it first")
+        try:
+            res = ingest.remove_source(col, name)
+        except KeyError:
+            return self._err(404, f"unknown source {name!r}")
+        forget_runtime(col.id)
+        try:
+            runtime(col.id, reload=True)
+            indexed = True
+        except NOT_INDEXED:
+            indexed = False
+        self._json({"ok": True, **res, "indexed": indexed})
+
+    # ----------------------------------------------------------------- PATCH
+    def _do_PATCH(self):
+        cid, path, _ = self._route()
+        if cid is None or path != "/":
+            return self._err(404, "not found")
+        req = self._body()
+        try:
+            library.get(cid)
+        except KeyError:
+            return self._err(404, "unknown collection")
+        errors = library.validate_update(req)
+        if errors:
+            return self._json({"error": "invalid fields: " + "; ".join(
+                f"{k}: {m}" for k, m in sorted(errors.items())),
+                "errors": errors}, 400)
+        col = library.update(cid, **req)
+        forget_runtime(cid)             # prompts read name/author at load
+        self._json(collection_summary(col))
+
     # ------------------------------------------------------------------ POST
     def _do_POST(self):
         cid, path, qs = self._route()
         if cid is None:
             if path == "/collections":
                 return self._create_collection(self._body())
+            if path == "/settings":
+                return self._post_global_settings(self._body())
             return self._err(404, "not found")
         # JSON routes: Content-Type + size are enforced before anything else
         req = None if path in _NON_JSON_POSTS else self._body()
@@ -591,12 +960,32 @@ class Handler(BaseHTTPRequestHandler):
             self._do_ask(cid, req)
         elif path == "/ingest":
             self._do_ingest(col, qs)
+        elif path == "/ingest/cancel":
+            job = running_job(col.id)
+            if job is not None:
+                job.cancel_event.set()
+            self._json({"ok": True, "cancelling": job is not None,
+                        **ingest_status(col.id)})
+        elif path == "/settings":
+            errors = col.save_settings(req)
+            if errors:
+                return self._json(_settings_error(errors), 400)
+            forget_runtime(col.id)
+            self._json(collection_settings(library.get(col.id)))
         elif path == "/import":
             self._do_import(col)
         elif path == "/source-meta":
             self._do_source_meta(col, req)
         else:
             self._err(404, "not found")
+
+    def _post_global_settings(self, req):
+        errors = config.save_user_settings(req)
+        if errors:
+            return self._json(_settings_error(errors), 400)
+        forget_all_runtimes()           # indexes rebuilt with new values
+        rag.reset_backend()             # embedded model reloads if changed
+        self._json(global_settings())
 
     def _create_collection(self, req):
         try:
@@ -626,10 +1015,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._err(400, str(e))
 
-    def _ndjson_start(self):
+    def _ndjson_start(self, headers=()):
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
+        for k, v in headers:
+            self.send_header(k, v)
         self.send_header("Connection", "close")
         self.end_headers()
         self._streaming = True
@@ -639,35 +1030,31 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _do_ingest(self, col, qs):
-        """Run the pipeline, streaming progress as NDJSON."""
-        import ingest
+        """Start the collection's background ingest job, or attach to the
+        one already running (then this request's options are ignored), and
+        stream the job's events as NDJSON until it ends. An attaching
+        client gets a REPLAY of the job's events from the start (or from
+        ?from=<n>, an index into them — GET /ingest/status reports
+        "events"), then the live tail, so it sees the same sequence as the
+        first client; ?from is ignored when a new job starts. Closing the
+        stream never stops the job.
+        Response headers: X-Ingest-Job (job id), X-Ingest-Attached (1/0)."""
         force = qs.get("force", ["0"])[0] == "1"
         summaries = qs.get("summaries", ["1"])[0] != "0"
-        self._ndjson_start()
-        if not _INGEST_LOCK.acquire(blocking=False):
-            self._w({"stage": "error",
-                     "status": "another ingest is already running"})
-            return
+        only = qs.get("source", [None])[0]
         try:
-            res = ingest.run_pipeline(col, force=force, summaries=summaries,
-                                      progress=self._w, workers=1)
-            try:
-                runtime(col.id, reload=True)
-            except NOT_INDEXED:          # no chunks produced
-                self._w({"stage": "error", "error": not_indexed_msg(col.id),
-                         "status": "no passages were produced — "
-                                   + not_indexed_msg(col.id)})
-                return
-            self._w({"stage": "complete", **res})
-        except BrokenPipeError:
-            pass
-        except Exception as e:
-            try:
-                self._w({"stage": "error", "status": str(e)})
-            except BrokenPipeError:
-                pass
-        finally:
-            _INGEST_LOCK.release()
+            start = int(qs.get("from", ["0"])[0])
+        except ValueError:
+            raise RequestError(400, "from must be an integer")
+        if only is not None and col.source_path(only) is None:
+            raise RequestError(404, f"unknown source {only!r}")
+        job, attached = start_ingest(col, force=force, summaries=summaries,
+                                     only=only)
+        self._ndjson_start(headers=(("X-Ingest-Job", job.id),
+                                    ("X-Ingest-Attached",
+                                     "1" if attached else "0")))
+        for ev in job.follow(start if attached else 0):
+            self._w(ev)
 
     def _do_ask(self, cid, req):
         # resolve the runtime BEFORE the stream starts, so "not indexed" is
@@ -724,8 +1111,9 @@ class Handler(BaseHTTPRequestHandler):
             w({"type": "done"})
         except urllib.error.URLError:
             w({"type": "error", "error":
-               f"Cannot reach {config.LLM_BACKEND} backend at {config.LLM_URL} "
-               f"(model {config.LLM_MODEL}). Check Settings and that the "
+               f"Cannot reach {config.get('LLM_BACKEND')} backend at "
+               f"{config.get('LLM_URL')} (model {config.get('LLM_MODEL')})."
+               f" Check Settings and that the "
                f"server is running."})
         except BrokenPipeError:
             pass  # client disconnected mid-stream
@@ -737,6 +1125,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_import(self, col):
         filename = self.headers.get("X-Filename", "upload.pdf")
+        if running_job(col.id):
+            raise RequestError(409, "an ingest is running for this "
+                                    "collection — wait for it to finish")
         if self.headers.get("Content-Length") is None:
             raise RequestError(411, "Content-Length required")
         length = self._content_length(MAX_UPLOAD)   # 413 before reading

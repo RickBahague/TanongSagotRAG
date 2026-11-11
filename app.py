@@ -24,6 +24,34 @@ def free_port():
         return s.getsockname()[1]
 
 
+class DesktopApi:
+    """Exposed to the page as window.pywebview.api (P3-3). pywebview only
+    exposes public methods; the window reference stays private (leading
+    underscore) so it is never walked or serialized into JS."""
+
+    def __init__(self):
+        self._window = None
+
+    def pick_folder(self):
+        """Native folder picker: the chosen folder's path, or None when the
+        dialog was cancelled (or no window exists yet)."""
+        if self._window is None:
+            return None
+        import webview
+        kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None)
+        if kind is None:                         # pywebview < 5
+            kind = webview.FOLDER_DIALOG
+        try:
+            picked = self._window.create_file_dialog(kind)
+        except Exception:
+            return None
+        if not picked:
+            return None
+        if isinstance(picked, str):
+            return picked
+        return str(picked[0]) if len(picked) else None
+
+
 def main():
     port = free_port()
     token = secrets.token_urlsafe(32)
@@ -34,8 +62,10 @@ def main():
 
     try:
         import webview  # pywebview
-        webview.create_window("AnyRAG — ask your documents", url,
-                              width=1040, height=780, min_size=(680, 500))
+        api = DesktopApi()
+        api._window = webview.create_window(
+            "AnyRAG — ask your documents", url, js_api=api,
+            width=1040, height=780, min_size=(680, 500))
         webview.start()          # blocks until window closes
     except ImportError:
         print(f"pywebview not installed — opening the app in your browser "

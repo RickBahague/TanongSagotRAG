@@ -65,8 +65,27 @@ _KEY_UNSAFE = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
 _KEY_MAX_BYTES = 160          # + longest suffix (".summaries.npz") << 255
 
 
+def source_rel(filename):
+    """Normalized source name: a RELATIVE posix path below the sources
+    folder ("report.md", "2020/report.md"). An absolute path, or a bare
+    name, reduces to its file name (flat collections: name == rel path)."""
+    s = str(filename)
+    if os.sep == "\\":                    # Windows separators
+        s = s.replace("\\", "/")
+    if s.startswith("/") or re.match(r"^[A-Za-z]:/", s):
+        return Path(s).name
+    parts = [p for p in s.split("/") if p not in ("", ".")]
+    return "/".join(parts) if parts else s
+
+
 def artifact_key_for(filename):
     """Artifact key of a source filename (see Collection.artifact_key).
+
+    A source in a subfolder of a linked folder is named by its relative
+    path ("a/report.md"); its "/" separators are unsafe in a file name, so
+    it takes the sanitize-and-hash form below ("a_report.md~<sha1>") —
+    a/report.md and b/report.md never collide, and no top-level name ever
+    gets a "~" suffix, so flat collections keep exactly the keys they had.
 
     Format: the FULL file name, verbatim ("report.md" -> "report.md", so
     chunks/report.md.jsonl, vectors/report.md.npz …) whenever it is already
@@ -76,7 +95,7 @@ def artifact_key_for(filename):
     hex digits of sha1(filename) are appended — so two names that sanitize
     to the same text still get different keys. Pure function of the
     filename: stable across runs and unique per filename in a folder."""
-    name = Path(filename).name
+    name = source_rel(filename)
     safe = _KEY_UNSAFE.sub("_", name)
     if (safe == name and not name.startswith(".")
             and len(name.encode("utf-8")) <= _KEY_MAX_BYTES):
@@ -193,13 +212,46 @@ class Collection:
 
     # -------------------------------------------------------------- sources
     def source_files(self):
-        """Supported documents in this collection, sorted by name."""
+        """Supported documents in this collection, sorted by relative path.
+        The sources folder is walked recursively (symlinked folders are not
+        followed, at most config.SOURCE_MAX_DEPTH levels); any file or
+        folder whose name matches config.SOURCE_IGNORE is skipped. A
+        source's identity everywhere (manifest, chunk "source", source_meta,
+        artifact key) is source_name(path)."""
         d = self.sources_dir
-        if not d.exists():
+        if not d.is_dir():
             return []
-        return sorted(p for p in d.iterdir()
-                      if p.suffix.lower() in SUPPORTED_SUFFIXES
-                      and not p.name.startswith("."))
+        out = []
+        root_depth = len(d.parts)
+        for top, dirs, files in os.walk(d, followlinks=False):
+            dirs[:] = sorted(x for x in dirs if not is_ignored(x))
+            if len(Path(top).parts) - root_depth >= config.SOURCE_MAX_DEPTH:
+                dirs[:] = []
+            for f in files:
+                p = Path(top) / f
+                if p.suffix.lower() in SUPPORTED_SUFFIXES \
+                        and not is_ignored(f) and p.is_file():
+                    out.append(p)
+        return sorted(out, key=lambda p: self.source_name(p))
+
+    def source_name(self, path):
+        """Relative posix path of a source file below sources_dir (== the
+        file name for a top-level source)."""
+        p = Path(path)
+        try:
+            return p.relative_to(self.sources_dir).as_posix()
+        except ValueError:
+            return source_rel(p)
+
+    def source_path(self, name):
+        """The live source file called `name` (a source_name), or None —
+        only files source_files() lists, so a crafted name can never reach
+        outside the sources folder or an ignored file."""
+        rel = source_rel(name)
+        for p in self.source_files():
+            if self.source_name(p) == rel:
+                return p
+        return None
 
     # ------------------------------------------------------ derived artifacts
     def artifact_key(self, filename):
@@ -257,7 +309,7 @@ class Collection:
 
     def work_title(self, filename):
         """Display title for a source file."""
-        m = self.source_meta.get(Path(filename).name)
+        m = self.source_meta.get(source_rel(filename))
         if m and m.get("title"):
             return m["title"]
         return Path(filename).stem
@@ -265,35 +317,88 @@ class Collection:
     def work_years(self, filename):
         """(lo, hi) plausible year range for a source, or None. From explicit
         metadata, else years found in the title/filename (± slack)."""
-        m = self.source_meta.get(Path(filename).name) or {}
+        m = self.source_meta.get(source_rel(filename)) or {}
         if m.get("years"):
             return tuple(m["years"])
         found = [int(y) for y in _YEARS_RX.findall(
-            self.work_title(filename) + " " + Path(filename).name)]
+            self.work_title(filename) + " " + source_rel(filename))]
         if found:
             return (min(found) - 3, max(found) + 3)
         return None
 
     def set_source_meta(self, filename, **kv):
-        entry = self.source_meta.setdefault(Path(filename).name, {})
+        entry = self.source_meta.setdefault(source_rel(filename), {})
         entry.update({k: v for k, v in kv.items() if v is not None})
         self.save()
 
     # ------------------------------------------------------------- settings
     def setting(self, key, default=None):
-        """Per-collection override, else global config value, else default."""
+        """Per-collection override, else the global value (config.get, read
+        at call time — global settings changes apply at once), else
+        default."""
         s = self._settings()
-        if key in s:
+        if key in s and s[key] is not None:
             return s[key]
-        return getattr(config, key, default)
+        return config.get(key, default)
 
     def _settings(self):
         if not hasattr(self, "_settings_cache"):
-            try:
-                self._settings_cache = json.loads(self.settings_file.read_text())
-            except (FileNotFoundError, json.JSONDecodeError):
-                self._settings_cache = {}
+            self._settings_cache = config.read_settings_file(
+                self.settings_file)
         return self._settings_cache
+
+    def overrides(self):
+        """Valid per-collection overrides (config.SETTINGS_SCHEMA scope
+        "collection"); unknown or invalid entries are ignored."""
+        return {k: v for k, v in self._settings().items()
+                if v is not None and k in config.SETTINGS_SCHEMA
+                and config.SETTINGS_SCHEMA[k]["scope"] == "collection"
+                and config.check_value(k, v) is None}
+
+    def save_settings(self, changes):
+        """Validate and merge {key: value|None} into this collection's
+        settings.json (None removes the override). Returns {} on success,
+        else {key: error} and nothing is written."""
+        with config.SETTINGS_LOCK:
+            self.__dict__.pop("_settings_cache", None)    # re-read the file
+            return self._save_settings(changes)
+
+    def _save_settings(self, changes):
+        glob = {k: config.get(k) for k in config.SETTINGS_SCHEMA}
+        base = dict(glob, **self.overrides())
+        clean, errors = config.validate_settings(changes, "collection", base,
+                                                 glob)
+        if errors:
+            return errors
+        data = dict(self._settings())
+        for k, v in clean.items():
+            if v is None:
+                data.pop(k, None)
+            else:
+                data[k] = v
+        write_json_atomic(self.settings_file, data, indent=2)
+        self.__dict__.pop("_settings_cache", None)
+        return {}
+
+    # ----------------------------------------------------------- disk usage
+    def disk_usage(self, files=None):
+        """{"size_bytes": bytes under the collection dir (managed sources
+        included), "source_bytes": bytes of the supported source files
+        (for a linked folder these live OUTSIDE the collection dir)}."""
+        total = 0
+        for top, _, names in os.walk(self.root):
+            for f in names:
+                try:
+                    total += os.lstat(os.path.join(top, f)).st_size
+                except OSError:
+                    pass
+        src = 0
+        for p in (self.source_files() if files is None else files):
+            try:
+                src += p.stat().st_size
+            except OSError:
+                pass
+        return {"size_bytes": total, "source_bytes": src}
 
     # -------------------------------------------------------------- persist
     def save(self):
@@ -308,6 +413,14 @@ class Collection:
             d.mkdir(parents=True, exist_ok=True)
         if not self.linked:
             self.sources_dir.mkdir(parents=True, exist_ok=True)
+
+
+def is_ignored(name):
+    """True when a file/folder name matches config.SOURCE_IGNORE."""
+    import fnmatch
+    low = name.lower()
+    return any(fnmatch.fnmatchcase(low, pat.lower())
+               for pat in config.SOURCE_IGNORE)
 
 
 # ------------------------------------------------------------------ registry
@@ -374,6 +487,68 @@ def create(name, link=None, description="", author="", persona=None):
     col.ensure_dirs()
     _save_registry(_registry() + [{"id": cid, "name": name,
                                    "created": meta["created"]}])
+    return col
+
+
+_EDITABLE = {"name": 200, "description": 2000, "author": 200}
+_PERSONA_KEYS = {"enabled": bool, "model": str, "backend": str, "url": str}
+
+
+def validate_update(fields):
+    """{field: error} for a PATCH /c/<id> body (empty dict = valid)."""
+    if not isinstance(fields, dict):
+        return {"_": "body must be a JSON object"}
+    errors = {}
+    for k, v in fields.items():
+        if k in _EDITABLE:
+            if not isinstance(v, str):
+                errors[k] = "must be a string"
+            elif len(v) > _EDITABLE[k]:
+                errors[k] = f"must be at most {_EDITABLE[k]} characters"
+            elif k == "name" and not v.strip():
+                errors[k] = "must not be empty"
+        elif k == "persona":
+            if v is None:
+                continue
+            if not isinstance(v, dict):
+                errors[k] = "must be an object {enabled, model?, backend?, url?} or null"
+                continue
+            for pk, pv in v.items():
+                want = _PERSONA_KEYS.get(pk)
+                if want is None:
+                    errors[f"persona.{pk}"] = "unknown persona field"
+                elif not isinstance(pv, want) or (want is str
+                                                  and len(pv) > 500):
+                    errors[f"persona.{pk}"] = f"must be a {want.__name__}"
+            b = v.get("backend")
+            if isinstance(b, str) and b and b not in ("ollama", "openai",
+                                                      "embedded"):
+                errors["persona.backend"] = "must be ollama, openai or embedded"
+            u = v.get("url")
+            if isinstance(u, str) and u and not re.match(r"^https?://", u):
+                errors["persona.url"] = "must be an http:// or https:// URL"
+        else:
+            errors[k] = "not editable (allowed: name, description, author, persona)"
+    return errors
+
+
+def update(cid, **fields):
+    """Edit a collection's name/description/author/persona. Raises
+    ValueError({field: error}) on invalid input (nothing written). The
+    registry entry's name follows collection.json."""
+    errors = validate_update(fields)
+    if errors:
+        raise ValueError(errors)
+    col = get(cid)
+    for k, v in fields.items():
+        if k == "persona" and v is None:
+            col.meta.pop("persona", None)
+        else:
+            col.meta[k] = v.strip() if k == "name" else v
+    col.save()
+    if "name" in fields:
+        _save_registry([dict(e, name=col.meta["name"]) if e["id"] == col.id
+                        else e for e in _registry()])
     return col
 
 

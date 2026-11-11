@@ -58,8 +58,8 @@ def _cfg(obj, key):
     col = obj if callable(getattr(obj, "setting", None)) \
         else getattr(obj, "col", None)
     if col is not None:
-        return col.setting(key, getattr(config, key, None))
-    return getattr(config, key)
+        return col.setting(key, config.get(key))
+    return config.get(key)
 
 
 def _attach_col(index, col):
@@ -537,9 +537,26 @@ _EMBEDDED_LLM = None
 _EMBEDDED_LOCK = threading.Lock()
 
 
+_EMBEDDED_KEY = None     # (model path, ctx, threads) the loaded GGUF used
+
+
+def reset_backend():
+    """Forget the loaded embedded model so the next generation loads it with
+    the current settings (serve.py calls this after a settings change). An
+    in-flight generation keeps its own reference and finishes normally."""
+    global _EMBEDDED_LLM, _EMBEDDED_KEY
+    _EMBEDDED_LLM = None
+    _EMBEDDED_KEY = None
+
+
 def _embedded_llm():
-    """Lazy-load the bundled GGUF once (first question pays the load cost)."""
-    global _EMBEDDED_LLM
+    """Lazy-load the bundled GGUF once (first question pays the load cost);
+    reloaded when LLM_MODEL_PATH / LLM_CTX / LLM_THREADS change."""
+    global _EMBEDDED_LLM, _EMBEDDED_KEY
+    want = (str(config.get("LLM_MODEL_PATH")), config.get("LLM_CTX"),
+            config.get("LLM_THREADS"))
+    if _EMBEDDED_KEY is not None and _EMBEDDED_KEY != want:
+        _EMBEDDED_LLM = None
     if _EMBEDDED_LLM is None:
         try:
             from llama_cpp import Llama
@@ -547,13 +564,13 @@ def _embedded_llm():
             raise RuntimeError(
                 "LLM_BACKEND is 'embedded' but llama-cpp-python is not "
                 "installed (pip install llama-cpp-python).")
-        if not Path(config.LLM_MODEL_PATH).exists():
-            raise RuntimeError(f"Model file missing: {config.LLM_MODEL_PATH}")
-        kwargs = {"model_path": str(config.LLM_MODEL_PATH),
-                  "n_ctx": config.LLM_CTX, "verbose": False}
-        if config.LLM_THREADS:
-            kwargs["n_threads"] = config.LLM_THREADS
+        if not Path(want[0]).exists():
+            raise RuntimeError(f"Model file missing: {want[0]}")
+        kwargs = {"model_path": want[0], "n_ctx": want[1], "verbose": False}
+        if want[2]:
+            kwargs["n_threads"] = want[2]
         _EMBEDDED_LLM = Llama(**kwargs)
+        _EMBEDDED_KEY = want
     return _EMBEDDED_LLM
 
 
@@ -567,7 +584,7 @@ def _open(req, model):
             detail = e.read().decode("utf-8", "replace")[:300]
         except Exception:
             detail = str(e)
-        raise RuntimeError(f"{config.LLM_BACKEND} backend error for model "
+        raise RuntimeError(f"{config.get('LLM_BACKEND')} backend error for model "
                            f"'{model}': {detail}") from None
 
 
@@ -577,18 +594,21 @@ def llm_stream(system, user, temperature=None, model=None, backend=None,
     `model`/`backend`/`url` override the defaults for this call (used by
     persona mode's dedicated voice model/server); `max_tokens` overrides
     config.LLM_MAX_TOKENS (the follow-up rewrite uses a small cap)."""
-    temperature = config.TEMPERATURE if temperature is None else temperature
-    max_tokens = config.LLM_MAX_TOKENS if max_tokens is None else max_tokens
-    model = model or config.LLM_MODEL
-    backend = backend or config.LLM_BACKEND
-    url = url or config.LLM_URL
+    # every value read NOW through config.get (settings apply without restart)
+    temperature = config.get("TEMPERATURE") if temperature is None \
+        else temperature
+    max_tokens = config.get("LLM_MAX_TOKENS") if max_tokens is None \
+        else max_tokens
+    model = model or config.get("LLM_MODEL")
+    backend = backend or config.get("LLM_BACKEND")
+    url = url or config.get("LLM_URL")
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
     if backend == "ollama":
         req = _request(f"{url}/api/chat", {
             "model": model, "messages": messages, "stream": True,
             "options": {"temperature": temperature,
-                        "num_ctx": config.LLM_CTX,
+                        "num_ctx": config.get("LLM_CTX"),
                         "num_predict": max_tokens}})
         with _open(req, model) as resp:
             for line in resp:

@@ -165,6 +165,105 @@
   .bar button:disabled { opacity:.5; }
   footer { position:fixed; bottom:2px; right:10px; font:11px system-ui, sans-serif;
            color:var(--muted); }
+  #stopBtn { background:#a33; }
+  #colEditBtn, #settingsBtn { border:1px solid var(--line); background:var(--card);
+      border-radius:6px; padding:5px 9px; cursor:pointer; font:13px system-ui, sans-serif; }
+
+  /* rendered Markdown answers (P3-5) */
+  .md { white-space:normal; }
+  .md p { margin:0 0 .7em; }
+  .md > :last-child { margin-bottom:0; }
+  .md h3, .md h4, .md h5, .md h6 { margin:.9em 0 .4em; color:var(--accent); line-height:1.3; }
+  .md h3 { font-size:1.15em; } .md h4 { font-size:1.05em; } .md h5, .md h6 { font-size:1em; }
+  .md ul, .md ol { margin:0 0 .7em; padding-left:1.6em; }
+  .md li { margin:.15em 0; }
+  .md li > p { margin:0 0 .3em; }
+  .md li > p:last-child { margin-bottom:0; }
+  .md blockquote { margin:0 0 .7em; padding:2px 14px; border-left:3px solid var(--line);
+                   color:#4a525c; }
+  .md code { font:.88em ui-monospace, Menlo, monospace; background:#eef1f4;
+             border-radius:4px; padding:1px 4px; }
+  .md pre { background:#eef1f4; border-radius:6px; padding:10px 12px; overflow-x:auto;
+            margin:0 0 .7em; white-space:pre; }
+  .md pre code { background:none; padding:0; }
+  .md hr { border:0; border-top:1px solid var(--line); margin:1em 0; }
+  .md a.ext { color:var(--accent2); }
+  .acts { display:block; margin-top:8px; white-space:normal; }
+  .acts button { font:12px system-ui, sans-serif; border:1px solid var(--line);
+                 background:var(--card); border-radius:12px; padding:2px 10px;
+                 cursor:pointer; color:var(--muted); }
+  .acts button:hover { color:var(--accent); border-color:var(--accent); }
+  .stopped { display:inline-block; font:12px system-ui, sans-serif; color:#8a4b00;
+             background:#fff3e0; border:1px solid #f0d2a8; border-radius:12px;
+             padding:2px 10px; margin-top:10px; white-space:normal; }
+
+  /* ingest progress (P3-4) */
+  .ingest { white-space:normal; font:13px system-ui, sans-serif; color:var(--ink); }
+  .ingest .plabel { margin-bottom:6px; }
+  .ingest .prow { display:flex; align-items:center; gap:10px; }
+  .pbar { flex:1; height:8px; background:#e5ecf2; border-radius:4px; overflow:hidden; }
+  .pbar .fill { height:100%; width:0; background:var(--accent2); transition:width .2s; }
+  .pbar.indet .fill { width:30%; animation:indet 1.2s ease-in-out infinite; }
+  @keyframes indet { 0%{margin-left:-30%} 100%{margin-left:100%} }
+  .pbar.ok .fill { background:#3a7d44; width:100%; }
+  .pbar.bad .fill { background:#a33; width:100%; }
+  .pbar.cx .fill { background:#c9a227; }
+  .ingest .pcancel { font:12px system-ui, sans-serif; border:1px solid #f0c4ba;
+                     background:#fbe9e5; color:#a33; border-radius:12px; padding:2px 10px;
+                     cursor:pointer; }
+  .ingest .pcancel:disabled { opacity:.5; cursor:default; }
+  .ingest details { margin-top:6px; color:var(--muted); }
+  .ingest details pre { font:12px ui-monospace, monospace; white-space:pre-wrap;
+                        max-height:160px; overflow-y:auto; margin:4px 0 0; }
+  .ingest .pfinal { margin-top:6px; }
+  .ingest .pfinal.bad { color:#a33; }
+
+  /* source table badges and actions */
+  .badge { display:inline-block; font:11px system-ui, sans-serif; border-radius:4px;
+           padding:0 6px; margin-left:6px; cursor:help; vertical-align:1px; }
+  .badge.err { background:#fbe9e5; color:#a33; border:1px solid #f0c4ba; }
+  .badge.notext { background:#fff3e0; color:#8a4b00; border:1px solid #f0d2a8; }
+  .panel button.e:disabled, .panel button.x:disabled { opacity:.35; cursor:not-allowed; }
+  .panel td.acts-c { white-space:nowrap; text-align:right; }
+
+  /* settings / collection forms */
+  .fbody { overflow-y:auto; padding:14px 24px 24px; font:14px system-ui, sans-serif; }
+  .fbody h3 { font:600 14px system-ui, sans-serif; color:var(--accent); margin:18px 0 6px;
+              border-bottom:1px solid var(--line); padding-bottom:4px; }
+  .fbody h3:first-child { margin-top:4px; }
+  .fbody details > summary { cursor:pointer; font:600 14px system-ui, sans-serif;
+                             color:var(--accent); margin:18px 0 6px; }
+  .field { margin:10px 0; }
+  .field .flab { display:flex; align-items:baseline; gap:8px; font-size:13px; color:var(--ink); }
+  .field .flab code { font:12px ui-monospace, monospace; color:var(--muted); }
+  .field .ctl { display:flex; gap:8px; align-items:center; margin-top:3px; }
+  .field input[type=text], .field select, .field textarea {
+      font:14px system-ui, sans-serif; padding:6px 9px; border:1px solid var(--line);
+      border-radius:6px; background:var(--card); flex:1; min-width:0; }
+  .field textarea { min-height:52px; resize:vertical; }
+  .field .hint { font-size:12px; color:var(--muted); margin-top:2px; }
+  .field .ferr { font-size:12px; color:#a33; margin-top:2px; }
+  .field.bad input, .field.bad select, .field.bad textarea { border-color:#d88; }
+  .field .reset { font:12px system-ui, sans-serif; border:0; background:none;
+                  color:var(--accent2); cursor:pointer; white-space:nowrap; }
+  .eff { font:11px system-ui, sans-serif; border-radius:4px; padding:0 6px;
+         background:#eef1f4; color:var(--muted); }
+  .eff.restart { background:#fff3e0; color:#8a4b00; }
+  .ovr { font:11px system-ui, sans-serif; color:var(--accent2); }
+  .fbtns { display:flex; gap:10px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+  .fbtns button { font:14px system-ui, sans-serif; padding:7px 16px; border-radius:7px;
+                  border:1px solid var(--line); background:var(--card); cursor:pointer; }
+  .fbtns button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .fbtns button.danger { color:#a33; border-color:#f0c4ba; background:#fbe9e5; }
+  .fbtns button:disabled { opacity:.5; cursor:default; }
+  .fmsg { font-size:13px; color:var(--muted); }
+  .fmsg.bad { color:#a33; }
+  .fmsg.good { color:#3a7d44; }
+  .conn { font-size:13px; margin-top:6px; white-space:pre-wrap; }
+  .conn.good { color:#3a7d44; } .conn.bad { color:#a33; }
+  #wBrowse { display:none; font:14px system-ui, sans-serif; padding:8px 12px;
+             border:1px solid var(--line); border-radius:6px; background:var(--card);
+             cursor:pointer; white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -172,6 +271,10 @@
   <div class="head-row">
     <h1>Tanong at Sagot</h1>
     <select id="colSelect" onchange="switchCollection(this.value)"></select>
+    <button id="colEditBtn" title="Edit this collection: name, author, persona, tuning, delete"
+            onclick="openColEdit()">✎</button>
+    <button id="settingsBtn" title="App settings: model backend and defaults"
+            onclick="openSettings()">⚙</button>
     <span id="collstats" onclick="toggle(libPanel)" title="sources in this collection"></span>
     <div class="mode" id="modeBar">
       <span id="modeBtns"></span>
@@ -217,6 +320,8 @@
   <div class="bar">
     <input id="q" placeholder="Ask this collection…" autocomplete="off" autofocus>
     <button id="go">Ask</button>
+    <button type="button" id="stopBtn" title="Stop generating" style="display:none"
+            onclick="stopAsk()">■ Stop</button>
     <button type="button" id="addColBtn" title="New collection" onclick="openWizard()">＋</button>
   </div>
 </form>
@@ -244,7 +349,11 @@
       <label>Name</label>
       <input type="text" id="wName" placeholder="e.g. Research papers">
       <label>Folder to link (optional)</label>
-      <input type="text" id="wLink" placeholder="/path/to/your/documents">
+      <div class="row">
+        <input type="text" id="wLink" placeholder="/path/to/your/documents" style="flex:1">
+        <button type="button" id="wBrowse" onclick="browseFolder()"
+                title="Choose a folder">Browse…</button>
+      </div>
       <div class="hint">Leave empty to create an empty collection and import
         files one by one. A linked folder is only read, never written to.</div>
       <label>Author (optional — for single-author corpora)</label>
@@ -261,11 +370,62 @@
   </div>
 </div>
 
+<div id="setWrap" class="modalWrap" onclick="if(event.target===this)closeSettings()">
+  <div class="modal">
+    <div class="mHead">
+      <h2>Settings</h2>
+      <span class="meta" id="setFile"></span>
+      <button class="close" onclick="closeSettings()" title="close">✕</button>
+    </div>
+    <div class="fbody" id="setBody"></div>
+  </div>
+</div>
+
+<div id="ceWrap" class="modalWrap" onclick="if(event.target===this)closeColEdit()">
+  <div class="modal">
+    <div class="mHead">
+      <h2 id="ceTitle">Collection</h2>
+      <button class="close" onclick="closeColEdit()" title="close">✕</button>
+    </div>
+    <div class="fbody" id="ceBody"></div>
+  </div>
+</div>
+
 <script>
 'use strict';
-let COL = null, STATS = null, mode = 'scholar';
-const api = p => '/c/' + encodeURIComponent(COL) + p;
+let COL = null, STATS = null, mode = 'scholar', COLS = [];
+let NOTIDX = null;             // the "no index yet — Index it now" message
+const apiFor = (cid, p) => '/c/' + encodeURIComponent(cid) + p;
+const api = p => apiFor(COL, p);
 const $ = id => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const d = document.createElement(tag);
+  if (cls) d.className = cls;
+  if (text !== undefined && text !== null) d.textContent = text;
+  return d;
+}
+
+// JSON request helper: {ok, status, data} (data = parsed body or {}).
+async function jreq(method, url, body) {
+  const opt = {method, headers: {}};
+  if (body !== undefined) {
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opt);
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* empty / non-JSON body */ }
+  return {ok: r.ok, status: r.status, data: data || {}};
+}
+
+function humanBytes(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return '? bytes';
+  const u = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(n < 10 ? 1 : 0) : String(n)) + ' ' + u[i];
+}
 
 function toggle(panel) {
   for (const p of document.querySelectorAll('.panel'))
@@ -276,6 +436,7 @@ function toggle(panel) {
 // ------------------------------------------------------------- collections
 async function loadCollections(selectId) {
   const cols = await (await fetch('/collections')).json();
+  COLS = cols;
   const sel = $('colSelect');
   sel.innerHTML = '';
   for (const c of cols) {
@@ -288,11 +449,17 @@ async function loadCollections(selectId) {
     $('welcome').style.display = '';
     $('modeBar').style.visibility = 'hidden';
     sel.style.display = 'none';
+    $('colEditBtn').style.display = 'none';
+    $('collstats').textContent = '';
+    $('starters').style.display = 'none';
+    $('log').textContent = '';
+    COL = null;
     return;
   }
   $('welcome').style.display = 'none';
   $('modeBar').style.visibility = '';
   sel.style.display = '';
+  $('colEditBtn').style.display = '';
   const stored = localStorage.getItem('anyrag-col');
   const pick = selectId || (cols.some(c => c.id === stored) ? stored : cols[0].id);
   sel.value = pick;
@@ -300,6 +467,7 @@ async function loadCollections(selectId) {
 }
 
 async function switchCollection(id) {
+  stopAsk();                   // an answer streaming into the old log
   COL = id;
   localStorage.setItem('anyrag-col', id);
   setConv(null);
@@ -308,21 +476,36 @@ async function switchCollection(id) {
   for (const p of document.querySelectorAll('.panel')) p.classList.remove('open');
   await loadStats();
   loadQuote();
+  reattachIngest(id);          // an ingest still running (other tab / reopen)
   $('q').focus();
+}
+
+// Refresh the collection list (counts, sizes) without switching collection.
+async function refreshColList() {
+  try { COLS = await (await fetch('/collections')).json(); } catch (e) { return; }
+  for (const o of $('colSelect').options) {
+    const c = COLS.find(x => x.id === o.value);
+    if (c) o.textContent = c.name + ' (' + c.sources + ')';
+  }
 }
 
 async function loadStats() {
   try {
     STATS = await (await fetch(api('/stats'))).json();
   } catch (e) { STATS = null; }
+  if (NOTIDX) { NOTIDX.remove(); NOTIDX = null; }
   if (!STATS || STATS.error) {
+    STATS = null;
     $('collstats').textContent = 'not indexed yet';
     $('starters').style.display = 'none';
+    $('libPanel').classList.remove('open');
+    if (ACTIVE_INGEST[COL]) return;        // its progress is already shown
     const d = addMsg('a', 'This collection has no index yet. ');
     const b = document.createElement('button');
     b.textContent = 'Index it now';
-    b.onclick = () => { d.remove(); rescan(false); };
+    b.onclick = () => { d.remove(); NOTIDX = null; rescan(false); };
     d.appendChild(b);
+    NOTIDX = d;
     return;
   }
   $('collstats').textContent = STATS.works.length + ' sources · '
@@ -384,10 +567,23 @@ function renderLibrary() {
   const tbl = document.createElement('table');
   tbl.innerHTML = '<tr><th>Source</th><th>Years</th><th style="text-align:right">Sections</th>'
       + '<th style="text-align:right">Passages</th><th>Segmentation</th><th></th></tr>';
+  const busy = !!ACTIVE_INGEST[COL];
   for (const w of STATS.works) {
     const tr = document.createElement('tr');
     const t = document.createElement('td');
     t.textContent = w.title;
+    if (w.title !== w.source) t.title = w.source;
+    if (w.error) {
+      const b = el('span', 'badge err', 'error');
+      b.title = 'Last ingest failed for this source: ' + w.error;
+      t.appendChild(b);
+    }
+    if (w.no_text) {
+      const b = el('span', 'badge notext', 'no text');
+      b.title = 'No extractable text (a scanned or image-only PDF?) — '
+              + 'nothing in this file can be searched.';
+      t.appendChild(b);
+    }
     const y = document.createElement('td');
     y.className = 'num';
     y.textContent = w.years ? w.years[0] + '–' + w.years[1] : '';
@@ -397,14 +593,55 @@ function renderLibrary() {
     sg.textContent = w.segmentation || '';
     sg.title = 'How sections were detected';
     const act = document.createElement('td');
+    act.className = 'acts-c';
     const e = document.createElement('button');
     e.className = 'e'; e.textContent = '✎'; e.title = 'Edit title / years';
     e.onclick = () => editSourceMeta(w);
-    act.appendChild(e);
+    const ri = el('button', 'e', '⟳');
+    ri.title = busy ? 'An ingest is running for this collection'
+                    : 'Re-ingest this source (re-chunk, summarize, embed)';
+    ri.disabled = busy;
+    ri.onclick = () => runIngest({source: w.source});
+    // remove: managed collections only — a linked folder is never written to
+    const rmWrap = el('span');
+    const rm = el('button', 'x', '✕');
+    if (STATS.linked) {
+      rm.disabled = true;
+      rmWrap.title = rm.title = 'Linked folder: AnyRAG never deletes your files. '
+          + 'Remove or move it in ' + STATS.folder + ', then Rescan.';
+    } else {
+      rm.disabled = busy;
+      rm.title = busy ? 'An ingest is running for this collection'
+                      : 'Remove this document from the collection';
+      rm.onclick = () => removeSource(w);
+    }
+    rmWrap.appendChild(rm);
+    act.append(e, ri, rmWrap);
     tr.append(t, y, es, ch, sg, act);
     tbl.appendChild(tr);
   }
   lib.appendChild(tbl);
+}
+
+async function removeSource(w) {
+  const cid = COL;
+  if (!confirm('Remove “' + w.title + '” (' + w.source + ') from this collection?\n\n'
+      + 'The file is deleted from the collection’s managed folder together with '
+      + 'its index data. This cannot be undone.')) return;
+  let res;
+  try {
+    res = await jreq('DELETE', apiFor(cid, '/source/' + encodeURIComponent(w.source)));
+  } catch (err) { addMsg('err', 'Could not remove ' + w.source + ': ' + err); return; }
+  if (COL !== cid) return;
+  if (!res.ok) {
+    addMsg('err', 'Could not remove ' + w.source + ': '
+        + (res.data.error || 'HTTP ' + res.status));
+    return;
+  }
+  addMsg('a prog', 'Removed ' + w.source + (res.data.indexed ? '.'
+      : ' — no indexed documents are left in this collection.'));
+  await refreshColList();
+  await loadStats();
 }
 
 async function editSourceMeta(w) {
@@ -425,6 +662,26 @@ async function editSourceMeta(w) {
 function openWizard() { $('wizWrap').classList.add('open'); $('wName').focus(); }
 function closeWizard() { $('wizWrap').classList.remove('open'); $('wizProg').textContent=''; }
 
+// P3-3: native folder picker, only inside the desktop window (pywebview's
+// js_api); in a browser the typed path is the only way in.
+function enableBrowse() {
+  const pw = window.pywebview;
+  if (pw && pw.api && typeof pw.api.pick_folder === 'function')
+    $('wBrowse').style.display = '';
+}
+window.addEventListener('pywebviewready', enableBrowse);
+
+async function browseFolder() {
+  try {
+    const p = await window.pywebview.api.pick_folder();
+    if (typeof p === 'string' && p) {
+      $('wLink').value = p;
+      if (!$('wName').value.trim())
+        $('wName').value = p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+    }
+  } catch (e) { /* dialog failed: the typed path still works */ }
+}
+
 async function createCollection() {
   const name = $('wName').value.trim();
   if (!name) { $('wName').focus(); return; }
@@ -442,55 +699,261 @@ async function createCollection() {
     const res = await r.json();
     if (res.error) throw new Error(res.error);
     COL = res.id;
+    let fin = {stage: 'complete'};
     if (res.sources > 0) {
-      prog.textContent += 'Indexing ' + res.sources + ' document(s)…\n';
-      await streamIngest(false, ev => {
-        prog.textContent += (ev.source ? ev.source + ': ' : '')
-            + (ev.status || ev.stage) + '\n';
-        prog.scrollTop = prog.scrollHeight;
-      });
+      prog.textContent = '';
+      const v = progressView(res.id, 'Indexing ' + res.sources + ' document(s)…');
+      prog.appendChild(v.el);
+      ACTIVE_INGEST[res.id] = v;
+      try {
+        fin = await streamIngest(res.id, {}, ev => v.update(ev));
+      } catch (err) {
+        fin = {stage: 'error', error: String(err.message || err)};
+      }
+      v.finish(fin);
+      delete ACTIVE_INGEST[res.id];
     } else {
       prog.textContent += 'Empty collection created — use ＋ Import to add files.\n';
     }
-    closeWizard();
-    await loadCollections(COL);
+    if (fin.stage === 'complete') closeWizard();   // else keep the result visible
+    await loadCollections(res.id);
   } catch (err) {
-    prog.textContent += 'Failed: ' + err.message + '\n';
+    prog.appendChild(document.createTextNode('Failed: ' + err.message + '\n'));
   }
   $('wizGo').disabled = false;
 }
 
-async function streamIngest(force, onEvent) {
-  const r = await fetch(api('/ingest?force=' + (force ? 1 : 0)), {method: 'POST'});
+// ----------------------------------------------------- ingest jobs (P3-4)
+// An ingest is a background job on the server: the NDJSON stream is only a
+// view on it (closing it does not stop the job), cancel is its own route,
+// and GET /ingest/status lets a reopened page show a run still going.
+const STAGE_LABEL = {queued: 'Waiting for another ingest', chunk: 'Chunking',
+  summarize: 'Summarizing', dates: 'Detecting dates', quotes: 'Building quote bank',
+  embed: 'Embedding', done: 'Finishing'};
+const INGEST_FINAL = ['complete', 'error', 'cancelled'];
+const ACTIVE_INGEST = {};        // collection id → progress view on screen
+
+function progressView(cid, title) {
+  const box = el('div', 'ingest');
+  const label = el('div', 'plabel', title);
+  const row = el('div', 'prow');
+  const bar = el('div', 'pbar indet');
+  const fill = el('div', 'fill');
+  bar.appendChild(fill);
+  const cancel = el('button', 'pcancel', 'Cancel');
+  cancel.type = 'button';
+  cancel.title = 'Stop this ingest — finished sources are kept';
+  cancel.onclick = async () => {
+    cancel.disabled = true; cancel.textContent = 'Cancelling…';
+    try {
+      const r = await fetch(apiFor(cid, '/ingest/cancel'), {method: 'POST'});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+    } catch (e) { cancel.disabled = false; cancel.textContent = 'Cancel'; }
+  };
+  row.append(bar, cancel);
+  const det = el('details');
+  det.appendChild(el('summary', null, 'details'));
+  const logEl = el('pre');
+  det.appendChild(logEl);
+  const fin = el('div', 'pfinal');
+  box.append(label, row, det, fin);
+  let lastLine = null;
+  const v = {el: box, note: null, final: null,
+    update(ev) {
+      if (!ev || !ev.stage || v.final) return;
+      if (INGEST_FINAL.includes(ev.stage)) { v.finish(ev); return; }
+      let txt = STAGE_LABEL[ev.stage] || ev.stage;
+      if (ev.stage === 'embed' && ev.i && ev.of) txt += ' ' + ev.i + '/' + ev.of;
+      if (ev.source) txt += ' · ' + ev.source;
+      const counted = typeof ev.done === 'number' && typeof ev.total === 'number'
+                      && ev.total > 0;
+      if (counted) {
+        bar.classList.remove('indet');
+        fill.style.width = Math.min(100, 100 * ev.done / ev.total).toFixed(1) + '%';
+        txt += ' (' + ev.done + '/' + ev.total + ')';
+      } else if (ev.stage === 'embed' && ev.i && ev.of) {
+        bar.classList.remove('indet');
+        fill.style.width = Math.min(100, 100 * ev.i / ev.of).toFixed(1) + '%';
+      } else {
+        bar.classList.add('indet');
+        fill.style.width = '';
+      }
+      label.textContent = txt;
+      if (ev.stage === 'embed' && typeof ev.done === 'number') return;  // per batch
+      const line = (ev.source ? ev.source + ': ' : '') + '[' + ev.stage + '] '
+                 + (ev.status || '');
+      if (line !== lastLine) {
+        logEl.textContent += line + '\n';
+        lastLine = line;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+    },
+    finish(ev) {
+      if (v.final) return;
+      v.final = ev = ev || {stage: 'error', error: 'no result'};
+      cancel.style.display = 'none';
+      bar.classList.remove('indet');
+      fill.style.width = '';
+      if (ev.stage === 'complete') {
+        bar.classList.add('ok');
+        label.textContent = 'Indexed' + (typeof ev.sources === 'number'
+            ? ': ' + ev.sources + ' source(s), '
+              + (ev.chunks || 0).toLocaleString() + ' passages' : '');
+      } else if (ev.stage === 'cancelled') {
+        bar.classList.add('cx');
+        fill.style.width = '100%';
+        label.textContent = 'Cancelled';
+        fin.textContent = ev.status || 'ingest cancelled';
+      } else {
+        bar.classList.add('bad');
+        label.textContent = 'Ingest failed';
+        fin.className = 'pfinal bad';
+        fin.textContent = ev.error || ev.status || 'unknown error';
+      }
+      if (ev.status) logEl.textContent += '[' + ev.stage + '] ' + ev.status + '\n';
+    },
+    attached() {
+      if (!v._att) { v._att = true;
+        logEl.textContent += '(attached to the ingest already running — '
+                           + 'its options apply)\n'; }
+    }};
+  return v;
+}
+
+// POST /ingest and follow its NDJSON stream; resolves with the final event.
+async function streamIngest(cid, opts, onEvent) {
+  const q = new URLSearchParams();
+  if (opts.force) q.set('force', '1');
+  if (opts.source) q.set('source', opts.source);
+  const r = await fetch(apiFor(cid, '/ingest' + (q.toString() ? '?' + q : '')),
+                        {method: 'POST'});
+  if (!r.ok || !r.body) {
+    let msg = 'HTTP ' + r.status;
+    try { const j = await r.json(); msg = j.error || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  const attached = r.headers.get('X-Ingest-Attached') === '1';
   const reader = r.body.getReader();
   const dec = new TextDecoder();
-  let buf = '';
+  let buf = '', final = null;
+  const handle = line => {
+    if (!line) return;
+    let ev;
+    try { ev = JSON.parse(line); } catch (e) { return; }
+    if (ev.type === 'error' && !ev.stage) ev.stage = 'error';
+    if (INGEST_FINAL.includes(ev.stage)) final = ev;
+    onEvent(ev, attached);
+  };
   while (true) {
     const {done, value} = await reader.read();
     if (done) break;
     buf += dec.decode(value, {stream: true});
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
+      handle(buf.slice(0, nl).trim());
       buf = buf.slice(nl + 1);
-      if (line) onEvent(JSON.parse(line));
     }
+  }
+  handle(buf.trim());
+  // stream ended without a final event: the job may still be running
+  return final || await pollIngest(cid, onEvent);
+}
+
+// Follow a job through GET /ingest/status until it ends; returns the final
+// event. Used to re-attach without POSTing (a POST would START a new job
+// if the old one finished in between).
+async function pollIngest(cid, onEvent, st) {
+  while (true) {
+    if (!st) {
+      try { st = await (await fetch(apiFor(cid, '/ingest/status'))).json(); }
+      catch (e) { st = null; }
+      if (!st) return {stage: 'error', error: 'lost contact with the server'};
+    }
+    if (st.last) onEvent(st.last, false);
+    if (!st.running) {
+      if (st.last && INGEST_FINAL.includes(st.last.stage)) return st.last;
+      if (st.state === 'idle') return {stage: 'complete'};
+      return {stage: INGEST_FINAL.includes(st.state) ? st.state : 'error',
+              error: st.error, status: st.error || st.state};
+    }
+    await new Promise(res => setTimeout(res, 800));
+    st = null;
   }
 }
 
-async function rescan(force) {
-  $('rescanBtn').disabled = true;
-  const note = addMsg('a prog', 'Scanning ' + (STATS ? STATS.folder : '') + '…\n');
-  try {
-    await streamIngest(force, ev => {
-      note.textContent += (ev.source ? ev.source + ': ' : '')
-          + (ev.status || ev.stage) + '\n';
-      note.scrollIntoView({behavior: 'instant', block: 'end'});
-    });
-    await loadStats();
-  } catch (err) { note.className = 'msg err'; note.textContent = 'Ingest failed: ' + err; }
-  $('rescanBtn').disabled = false;
+function setIngestBusy() {
+  const busy = !!ACTIVE_INGEST[COL];
+  $('rescanBtn').disabled = busy;
+  $('importBtn').disabled = busy;
+  if (STATS) renderLibrary();
 }
+
+// Run (or attach to) an ingest of the current collection, with a progress
+// message in the conversation log. opts: {force, source}.
+async function runIngest(opts) {
+  const cid = COL;
+  if (!cid) return;
+  if (ACTIVE_INGEST[cid]) {           // already shown: just bring it back
+    const n = ACTIVE_INGEST[cid].note;
+    if (n) { if (!n.isConnected) log.appendChild(n); n.scrollIntoView({block: 'end'}); }
+    return;
+  }
+  if (NOTIDX) { NOTIDX.remove(); NOTIDX = null; }
+  const note = addMsg('a', '');
+  const v = progressView(cid, opts.source ? 'Re-ingesting ' + opts.source + '…'
+      : 'Scanning ' + (STATS ? STATS.folder : 'the folder') + '…');
+  v.note = note;
+  note.appendChild(v.el);
+  ACTIVE_INGEST[cid] = v;
+  setIngestBusy();
+  let fin;
+  try {
+    fin = await streamIngest(cid, opts, (ev, att) => {
+      if (att) v.attached();
+      v.update(ev);
+    });
+  } catch (err) {
+    fin = {stage: 'error', error: String(err.message || err)};
+  }
+  v.finish(fin);
+  delete ACTIVE_INGEST[cid];
+  if (COL === cid) {
+    setIngestBusy();
+    await refreshColList();
+    await loadStats();
+  }
+}
+
+// On opening a collection: if its ingest is still running (started in
+// another tab, or before a reload), show its progress again.
+async function reattachIngest(cid) {
+  const shown = ACTIVE_INGEST[cid];
+  if (shown) {
+    if (shown.note && !shown.note.isConnected && COL === cid) log.appendChild(shown.note);
+    setIngestBusy();
+    return;
+  }
+  let st;
+  try { st = await (await fetch(apiFor(cid, '/ingest/status'))).json(); }
+  catch (e) { return; }
+  if (!st || !st.running || COL !== cid || ACTIVE_INGEST[cid]) return;
+  if (NOTIDX) { NOTIDX.remove(); NOTIDX = null; }
+  const note = addMsg('a', '');
+  const v = progressView(cid, 'Ingest in progress…');
+  v.note = note;
+  note.appendChild(v.el);
+  ACTIVE_INGEST[cid] = v;
+  setIngestBusy();
+  v.finish(await pollIngest(cid, ev => v.update(ev), st));
+  delete ACTIVE_INGEST[cid];
+  if (COL === cid) {
+    setIngestBusy();
+    await refreshColList();
+    await loadStats();
+  }
+}
+
+function rescan(force) { return runIngest({force: !!force}); }
 
 // ------------------------------------------------------------------ import
 fileInput.onchange = async () => {
@@ -508,6 +971,7 @@ fileInput.onchange = async () => {
       note.textContent = 'Imported "' + res.work + '": ' + res.chunks +
         ' passages' + (res.embedded ? ', embedded' : ' (keyword search only)') +
         '. Ready to ask.';
+      refreshColList();
       loadStats();
     }
   } catch (err) { note.className = 'msg err'; note.textContent = 'Import failed: ' + err; }
@@ -584,6 +1048,7 @@ function setConv(id) {
 }
 
 function newConversation() {
+  stopAsk();
   setConv(null);
   log.textContent = '';
   histPanel.classList.remove('open');
@@ -696,8 +1161,254 @@ function searchedFor(q) {
   return d;
 }
 
+// ---- markdown (begin) ---------------------------------- P3-5 renderer
+// A deliberately small Markdown subset for scholar/persona answers:
+// paragraphs, # headings, **bold**/__bold__, *italic*/_italic_, `code`,
+// ``` fenced code, - / 1. lists (nested by indentation), > blockquotes, ---
+// rules and [text](http(s)://…) links. Output is built ONLY with
+// createElement / text nodes from a fixed tag set — model text never
+// reaches innerHTML, raw HTML in the answer stays literal text, and a link
+// is only made for an http:/https: URL (anything else stays plain text).
+// Plain-text runs go through appendLinkified(), so [n] citation markers
+// become reader links inside paragraphs, lists, headings, quotes, bold…
+// (not inside code, which is shown verbatim).
+const MD_INLINE = new RegExp([
+  '\\\\([\\\\`*_{}\\[\\]()#+\\-.!>|~])',              // 1 backslash escape
+  '(`{1,2})([^`]{1,2000}?)\\2(?!`)',                        // 2,3 code span
+  '\\*\\*(?=\\S)([\\s\\S]{0,1000}?\\S)\\*\\*',                // 4 **bold**
+  '__(?=\\S)([\\s\\S]{0,1000}?\\S)__',                        // 5 __bold__
+  '\\*(?=[^\\s*])([\\s\\S]{0,1000}?[^\\s*])\\*',              // 6 *italic*
+  '_(?=[^\\s_])([\\s\\S]{0,1000}?[^\\s_])_',                  // 7 _italic_
+  '\\[([^\\[\\]\\n]+)\\]\\(\\s*([^()\\s]+)\\s*\\)',    // 8,9 [text](url)
+].join('|'), 'g');
+const MD_SAFE_URL = /^https?:\/\/[^\s]+$/i;
+const MD_MAX_DEPTH = 8;
+
+function mdInline(el, text, sources, depth) {
+  depth = depth || 0;
+  const rx = new RegExp(MD_INLINE.source, 'g');
+  let last = 0, plain = '', m;
+  const flush = () => {
+    if (!plain) return;
+    plain.split('\n').forEach((part, k) => {
+      if (k) el.appendChild(document.createElement('br'));
+      if (part) appendLinkified(el, part, sources);
+    });
+    plain = '';
+  };
+  while ((m = rx.exec(text)) !== null) {
+    plain += text.slice(last, m.index);
+    last = rx.lastIndex;
+    if (m[1] !== undefined) { plain += m[1]; continue; }
+    if (m[2] !== undefined) {
+      flush();
+      el.appendChild(mdCode(m[3]));
+      continue;
+    }
+    // _x_ / __x__ only at word boundaries (snake_case_names stay as typed);
+    // past the nesting cap, markup is kept as literal text
+    const under = m[5] !== undefined || m[7] !== undefined;
+    if ((under && (/\w/.test(text.charAt(m.index - 1)) ||
+                   /\w/.test(text.charAt(rx.lastIndex)))) || depth >= MD_MAX_DEPTH) {
+      plain += m[0].charAt(0);
+      last = rx.lastIndex = m.index + 1;
+      continue;
+    }
+    if (m[4] !== undefined || m[5] !== undefined) {
+      flush();
+      const s = document.createElement('strong');
+      mdInline(s, m[4] !== undefined ? m[4] : m[5], sources, depth + 1);
+      el.appendChild(s);
+    } else if (m[6] !== undefined || m[7] !== undefined) {
+      flush();
+      const s = document.createElement('em');
+      mdInline(s, m[6] !== undefined ? m[6] : m[7], sources, depth + 1);
+      el.appendChild(s);
+    } else if (m[8] !== undefined) {
+      if (MD_SAFE_URL.test(m[9])) {
+        flush();
+        const a = document.createElement('a');
+        a.className = 'ext';
+        a.href = m[9];
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.title = m[9];
+        a.textContent = m[8];           // no nested markup / citation links
+        el.appendChild(a);
+      } else {
+        plain += m[0];                  // javascript:, data:, relative … → text
+      }
+    }
+  }
+  plain += text.slice(last);
+  flush();
+}
+
+function mdCode(text) {
+  const c = document.createElement('code');
+  c.textContent = text;
+  return c;
+}
+
+const MD_FENCE = /^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)\s*$/;
+const MD_HEAD = /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/;
+const MD_HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const MD_QUOTE = /^ {0,3}>[ \t]?(.*)$/;
+const MD_UL = /^([ \t]*)([-*+])[ \t]+(.*)$/;
+const MD_OL = /^([ \t]*)(\d{1,9})[.)][ \t]+(.*)$/;
+
+const mdIndent = l => l.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
+const mdIsBlockStart = l => MD_FENCE.test(l) || MD_HEAD.test(l) || MD_HR.test(l)
+    || MD_QUOTE.test(l) || MD_UL.test(l) || MD_OL.test(l);
+
+function mdBlocks(el, lines, sources, depth) {
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    let m;
+    if ((m = line.match(MD_FENCE))) {
+      const close = new RegExp('^ {0,3}' + (m[1][0] === '`' ? '`' : '~')
+                               + '{' + m[1].length + ',}\\s*$');
+      const body = [];
+      i++;
+      while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
+      i++;                                   // closing fence (or end of text)
+      const pre = document.createElement('pre');
+      pre.appendChild(mdCode(body.join('\n')));
+      el.appendChild(pre);
+      continue;
+    }
+    if ((m = line.match(MD_HEAD))) {
+      const h = document.createElement('h' + Math.min(6, m[1].length + 2));
+      mdInline(h, m[2], sources, depth);
+      el.appendChild(h);
+      i++;
+      continue;
+    }
+    if (MD_HR.test(line)) {
+      el.appendChild(document.createElement('hr'));
+      i++;
+      continue;
+    }
+    if (MD_QUOTE.test(line)) {
+      const inner = [];
+      while (i < lines.length && (m = lines[i].match(MD_QUOTE))) { inner.push(m[1]); i++; }
+      const bq = document.createElement('blockquote');
+      if (depth >= MD_MAX_DEPTH) mdInline(bq, inner.join('\n'), sources, depth);
+      else mdBlocks(bq, inner, sources, depth + 1);
+      el.appendChild(bq);
+      continue;
+    }
+    const mo = line.match(MD_OL), mu = mo ? null : line.match(MD_UL);
+    if (mo || mu) {
+      const ordered = !!mo, rx = ordered ? MD_OL : MD_UL;
+      const base = mdIndent(line);
+      const list = document.createElement(ordered ? 'ol' : 'ul');
+      if (ordered && +mo[2] !== 1) list.setAttribute('start', String(+mo[2]));
+      const items = [];
+      while (i < lines.length) {
+        const l = lines[i];
+        const im = l.match(rx);
+        if (im && mdIndent(l) <= base + 1 && !MD_HR.test(l)) {   // next sibling
+          items.push({first: im[3], rest: []});
+          i++;
+          continue;
+        }
+        const item = items[items.length - 1];
+        if (!l.trim()) {           // a blank line continues the list only if
+          let j = i + 1;           // indented content or a sibling follows
+          while (j < lines.length && !lines[j].trim()) j++;
+          if (j < lines.length && (mdIndent(lines[j]) > base ||
+              (rx.test(lines[j]) && mdIndent(lines[j]) <= base + 1))) {
+            item.rest.push('');
+            i++;
+            continue;
+          }
+          break;
+        }
+        if (mdIndent(l) > base || !mdIsBlockStart(l)) {   // nested / lazy line
+          item.rest.push(l);
+          i++;
+          continue;
+        }
+        break;
+      }
+      for (const it of items) {
+        const li = document.createElement('li');
+        if (!it.rest.length || depth >= MD_MAX_DEPTH) {
+          mdInline(li, [it.first].concat(it.rest).join('\n'), sources, depth);
+        } else {
+          const ind = it.rest.filter(x => x.trim()).map(mdIndent);
+          const cut = ind.length ? Math.min.apply(null, ind) : 0;
+          const rest = it.rest.map(x => x.replace(/\t/g, '    ').slice(Math.min(cut, mdIndent(x))));
+          mdBlocks(li, [it.first].concat(rest), sources, depth + 1);
+        }
+        list.appendChild(li);
+      }
+      el.appendChild(list);
+      continue;
+    }
+    // paragraph: up to a blank line or the start of another block
+    const para = [line.replace(/^\s+/, '')];
+    i++;
+    while (i < lines.length && lines[i].trim() && !mdIsBlockStart(lines[i]))
+      para.push(lines[i++].replace(/^\s+/, ''));
+    const p = document.createElement('p');
+    mdInline(p, para.join('\n'), sources, depth);
+    el.appendChild(p);
+  }
+}
+
+// Markdown text → a detached <div class="md"> (DOM nodes only).
+function renderMarkdown(text, sources) {
+  const root = document.createElement('div');
+  root.className = 'md';
+  mdBlocks(root, String(text || '').replace(/\r\n?/g, '\n').split('\n'),
+           sources || [], 0);
+  return root;
+}
+// ---- markdown (end)
+
+// Copy text to the clipboard: async Clipboard API, else a hidden textarea +
+// execCommand (older WebViews / non-secure contexts).
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* fall through */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) { return false; }
+}
+
+function answerActions(text) {
+  const row = el('span', 'acts');
+  const b = el('button', null, '⧉ Copy');
+  b.type = 'button';
+  b.title = 'Copy the answer text (Markdown)';
+  b.onclick = async () => {
+    const ok = await copyText(text);
+    b.textContent = ok ? '✓ Copied' : 'Copy failed';
+    setTimeout(() => { b.textContent = '⧉ Copy'; }, 1500);
+  };
+  row.appendChild(b);
+  return row;
+}
+
 // One rendering path for live answers (on completion) and reopened turns.
-// turn: {mode, answer, sources, verify, citations?, rewritten_question?}
+// turn: {mode, answer, sources, verify, citations?, rewritten_question?,
+//        stopped?}
 function renderAnswer(el, turn) {
   el.textContent = '';
   if (turn.rewritten_question) el.appendChild(searchedFor(turn.rewritten_question));
@@ -715,7 +1426,14 @@ function renderAnswer(el, turn) {
   } else {
     const text = (turn.answer || '').replace(/^\*\[[^\]]*\]\*\s*/, '');
     if (turn.mode === 'quotes') el.appendChild(document.createTextNode(text));
-    else appendLinkified(el, text, turn.sources);
+    else el.appendChild(renderMarkdown(text, turn.sources));
+  }
+  if (turn.stopped) {
+    const s = document.createElement('span');
+    s.className = 'stopped';
+    s.textContent = '■ stopped — partial answer';
+    s.title = 'Generation was stopped; this turn may not be saved in the conversation';
+    el.appendChild(s);
   }
   const numbered = turn.mode !== 'quotes';
   const cits = numbered ? (turn.citations || null) : null;   // old turns: no key
@@ -723,6 +1441,7 @@ function renderAnswer(el, turn) {
   if (warn) { el.appendChild(document.createElement('br')); el.appendChild(warn); }
   if (turn.sources && turn.sources.length)
     el.appendChild(sourcesBlock(turn.sources, numbered, cits));
+  if (turn.answer) el.appendChild(answerActions(turn.answer));
 }
 
 async function openConversation(id) {
@@ -825,7 +1544,7 @@ function openReader(id) {
 
 function closeReader() { $('readerWrap').classList.remove('open'); }
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeReader(); closeWizard(); }
+  if (e.key === 'Escape') { closeReader(); closeWizard(); closeSettings(); closeColEdit(); }
 });
 
 // numbered: prefix [1]..[n] so the list matches the answer's markers;
@@ -861,22 +1580,570 @@ function sourcesBlock(sources, numbered, citations) {
   return det;
 }
 
+// ------------------------------------------------- settings forms (P3-1)
+// Fields are generated from the server's schema: settings[K] = {value,
+// default, overridden, type, scope, effect, help, choices?|min?/max?}.
+const EFFECT_TEXT = {reingest: 'applies on re-ingest', restart: 'applies after restart'};
+const fmtVal = v => v === null || v === undefined ? '(none)' : String(v);
+
+// opts: {label, onReset(key), resetLabel, keep: raw value to restore}
+function settingField(key, spec, opts) {
+  opts = opts || {};
+  const f = el('div', 'field');
+  const lab = el('div', 'flab');
+  lab.appendChild(el('span', null, opts.label || key));
+  if (opts.label) lab.appendChild(el('code', null, key));
+  if (EFFECT_TEXT[spec.effect])
+    lab.appendChild(el('span', 'eff ' + spec.effect, EFFECT_TEXT[spec.effect]));
+  if (spec.overridden) lab.appendChild(el('span', 'ovr', '● changed'));
+  f.appendChild(lab);
+  const ctl = el('div', 'ctl');
+  let input;
+  if (spec.type === 'enum') {
+    input = document.createElement('select');
+    for (const c of spec.choices || []) {
+      const o = document.createElement('option');
+      o.value = String(c); o.textContent = String(c);
+      input.appendChild(o);
+    }
+    input.value = String(spec.value);
+  } else {
+    input = document.createElement('input');
+    input.type = 'text';
+    if (spec.type === 'int' || spec.type === 'float') {
+      input.inputMode = spec.type === 'int' ? 'numeric' : 'decimal';
+      input.style.maxWidth = '140px';
+    }
+    input.value = spec.value === null || spec.value === undefined ? '' : String(spec.value);
+  }
+  if (opts.keep !== undefined) input.value = opts.keep;
+  input.id = 'set-' + (opts.idPrefix || '') + key;
+  ctl.appendChild(input);
+  if (spec.overridden && opts.onReset) {
+    const r = el('button', 'reset', opts.resetLabel || '↺ reset to default');
+    r.type = 'button';
+    r.title = 'Remove this override — use ' + fmtVal(spec.default);
+    r.onclick = () => opts.onReset(key);
+    ctl.appendChild(r);
+  }
+  f.appendChild(ctl);
+  const hint = [];
+  if (spec.help) hint.push(spec.help);
+  if (spec.min !== undefined || spec.max !== undefined)
+    hint.push('range ' + fmtVal(spec.min) + '–' + fmtVal(spec.max));
+  if (spec.overridden) hint.push('default ' + fmtVal(spec.default));
+  if (hint.length) f.appendChild(el('div', 'hint', hint.join(' · ')));
+  const err = el('div', 'ferr');
+  f.appendChild(err);
+  return {el: f, key, spec, input,
+    raw() { return input.value; },
+    // {changed, value}: numbers parsed when they look like numbers; any
+    // other text is sent as typed so the server's validation message shows
+    read() {
+      const raw = input.value;
+      let value = raw;
+      if (spec.type === 'enum') {
+        const c = (spec.choices || []).find(x => String(x) === raw);
+        value = c === undefined ? raw : c;
+      } else if (spec.type === 'int' || spec.type === 'float') {
+        const t = raw.trim();
+        value = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t) ? Number(t) : t;
+      } else value = raw.trim();
+      const cur = spec.value === null || spec.value === undefined ? '' : String(spec.value);
+      return {changed: String(value) !== cur, value};
+    },
+    setError(msg) { err.textContent = msg || ''; f.classList.toggle('bad', !!msg); }};
+}
+
+// Collect changed fields → {K: value}; errors from a 400 go back inline.
+function changedValues(fields) {
+  const out = {};
+  for (const f of fields) {
+    f.setError('');
+    const r = f.read();
+    if (r.changed) out[f.key] = r.value;
+  }
+  return out;
+}
+
+function showFieldErrors(fields, errors, msgEl) {
+  const left = [];
+  for (const [k, m] of Object.entries(errors || {})) {
+    const f = fields.find(x => x.key === k);
+    if (f) {
+      f.setError(m);
+      for (let p = f.el.parentNode; p; p = p.parentNode)
+        if (p.tagName === 'DETAILS') p.open = true;
+    } else left.push(k + ': ' + m);
+  }
+  msgEl.className = 'fmsg bad';
+  msgEl.textContent = left.length ? left.join('; ') : 'Please fix the highlighted fields.';
+}
+
+function effectNote(spec, keys) {
+  const re = keys.filter(k => spec[k] && spec[k].effect === 'reingest');
+  const rs = keys.filter(k => spec[k] && spec[k].effect === 'restart');
+  let s = '';
+  if (re.length) s += ' ' + re.join(', ') + ' take effect on the next re-ingest (⟳ Rescan).';
+  if (rs.length) s += ' ' + rs.join(', ') + ' take effect after restarting the app.';
+  return s;
+}
+
+// ---- global settings modal
+const BACKEND_KEYS = ['LLM_BACKEND', 'LLM_URL', 'LLM_MODEL', 'LLM_MODEL_PATH'];
+const BACKEND_LABELS = {LLM_BACKEND: 'Backend', LLM_URL: 'Server URL',
+  LLM_MODEL: 'Model', LLM_MODEL_PATH: 'GGUF model file (embedded backend)'};
+let SET_FIELDS = [];
+
+async function openSettings() {
+  $('setWrap').classList.add('open');
+  $('setBody').textContent = 'Loading…';
+  try {
+    const r = await jreq('GET', '/settings');
+    if (!r.ok) throw new Error(r.data.error || 'HTTP ' + r.status);
+    renderSettings(r.data);
+  } catch (err) { $('setBody').textContent = 'Could not load settings: ' + err.message; }
+}
+function closeSettings() { $('setWrap').classList.remove('open'); }
+
+function renderSettings(data, keep, note) {
+  keep = keep || {};
+  const body = $('setBody');
+  body.textContent = '';
+  $('setFile').textContent = data.file ? 'saved in ' + data.file : '';
+  $('setFile').title = data.file || '';
+  const spec = data.settings || {};
+  SET_FIELDS = [];
+  const onReset = k => saveSettings({[k]: null}, k);
+  const mk = (k, label) => {
+    const f = settingField(k, spec[k], {label, onReset, keep: keep[k]});
+    SET_FIELDS.push(f);
+    return f;
+  };
+
+  body.appendChild(el('h3', null, 'Model backend'));
+  const fb = {};
+  for (const k of BACKEND_KEYS) if (spec[k]) { fb[k] = mk(k, BACKEND_LABELS[k]); body.appendChild(fb[k].el); }
+  // installed-model picker next to the free-text model field
+  const pick = document.createElement('select');
+  pick.style.display = 'none';
+  pick.style.flex = '0 1 200px';
+  pick.title = 'Models the server reports';
+  if (fb.LLM_MODEL) {
+    fb.LLM_MODEL.input.parentNode.insertBefore(pick, fb.LLM_MODEL.input.nextSibling);
+    pick.onchange = () => { if (pick.value) fb.LLM_MODEL.input.value = pick.value; };
+  }
+  const fillModels = models => {
+    pick.textContent = '';
+    if (!models || !models.length) { pick.style.display = 'none'; return; }
+    const o0 = document.createElement('option');
+    o0.value = ''; o0.textContent = 'installed models ▾';
+    pick.appendChild(o0);
+    for (const n of models) {
+      const o = document.createElement('option');
+      o.value = n; o.textContent = n;
+      pick.appendChild(o);
+    }
+    pick.style.display = '';
+  };
+  const syncBackend = () => {
+    const b = fb.LLM_BACKEND ? fb.LLM_BACKEND.input.value : data.backend;
+    const emb = b === 'embedded';
+    if (fb.LLM_URL) fb.LLM_URL.el.style.display = emb ? 'none' : '';
+    if (fb.LLM_MODEL) fb.LLM_MODEL.el.style.display = emb ? 'none' : '';
+    if (fb.LLM_MODEL_PATH) fb.LLM_MODEL_PATH.el.style.display = emb ? '' : 'none';
+  };
+  if (fb.LLM_BACKEND) fb.LLM_BACKEND.input.addEventListener('change', () => {
+    syncBackend(); fillModels(null); conn.textContent = ''; });
+  syncBackend();
+
+  const tb = el('div', 'fbtns');
+  const test = el('button', null, 'Test connection');
+  test.type = 'button';
+  const conn = el('div', 'conn');
+  tb.appendChild(test);
+  body.append(tb, conn);
+  const runTest = async quiet => {
+    const q = new URLSearchParams();
+    for (const [k, p] of [['LLM_BACKEND', 'backend'], ['LLM_URL', 'url'],
+                          ['LLM_MODEL', 'model'], ['LLM_MODEL_PATH', 'model_path']])
+      if (fb[k] && fb[k].input.value.trim()) q.set(p, fb[k].input.value.trim());
+    test.disabled = true;
+    if (!quiet) { conn.className = 'conn'; conn.textContent = 'Testing…'; }
+    try {
+      const r = await jreq('GET', '/backend/status?' + q);
+      const s = r.data;
+      if (!r.ok) throw new Error(s.error || 'HTTP ' + r.status);
+      fillModels(s.backend === 'ollama' ? s.models : (s.models && s.models.length ? s.models : null));
+      const lines = [];
+      lines.push((s.reachable ? '✓ reachable' : '✗ not reachable')
+          + (s.backend === 'embedded' ? '' : ' — ' + (s.url || '')));
+      if (s.backend === 'embedded') {
+        lines.push((s.file_exists ? '✓' : '✗') + ' model file ' + (s.model_path || ''));
+        lines.push((s.llama_cpp ? '✓' : '✗') + ' llama-cpp-python installed');
+      } else {
+        lines.push(s.model_present === true ? '✓ model “' + s.model + '” present'
+            : s.model_present === false ? '✗ model “' + s.model + '” not found on the server'
+            : '? model presence unknown');
+        if (s.models) lines.push(s.models.length + ' model(s) available');
+      }
+      if (s.error) lines.push(s.error);
+      const good = s.reachable && s.model_present !== false && !s.error;
+      if (!quiet || !good) {
+        conn.className = 'conn ' + (good ? 'good' : 'bad');
+        conn.textContent = lines.join('\n');
+      }
+    } catch (err) {
+      conn.className = 'conn bad';
+      conn.textContent = 'Test failed: ' + err.message;
+    }
+    test.disabled = false;
+  };
+  test.onclick = () => runTest(false);
+
+  // everything else, generated from the schema
+  const adv = document.createElement('details');
+  adv.appendChild(el('summary', null, 'Advanced'));
+  const rest = Object.keys(spec).filter(k => !BACKEND_KEYS.includes(k));
+  const glob = rest.filter(k => spec[k].scope !== 'collection');
+  const coll = rest.filter(k => spec[k].scope === 'collection');
+  if (glob.length) {
+    adv.appendChild(el('h3', null, 'Application'));
+    for (const k of glob) adv.appendChild(mk(k).el);
+  }
+  if (coll.length) {
+    adv.appendChild(el('h3', null, 'Defaults for every collection'));
+    adv.appendChild(el('div', 'hint',
+      'Each collection can override these in its own settings (✎ next to the collection name).'));
+    for (const k of coll) adv.appendChild(mk(k).el);
+  }
+  body.appendChild(adv);
+
+  const btns = el('div', 'fbtns');
+  const save = el('button', 'primary', 'Save');
+  save.type = 'button';
+  const msg = el('span', 'fmsg');
+  if (note) { msg.className = 'fmsg good'; msg.textContent = note; }
+  save.onclick = () => {
+    const ch = changedValues(SET_FIELDS);
+    if (!Object.keys(ch).length) { msg.className = 'fmsg'; msg.textContent = 'No changes.'; return; }
+    saveSettings(ch);
+  };
+  btns.append(save, msg);
+  body.appendChild(btns);
+  SET_FIELDS.msg = msg;
+  if (spec.LLM_BACKEND && spec.LLM_BACKEND.value !== 'embedded') runTest(true);
+}
+
+// POST /settings; resetKey = the field whose override is being removed
+// (other unsaved edits are kept in the re-rendered form).
+async function saveSettings(changes, resetKey) {
+  const keep = {};
+  for (const f of SET_FIELDS) if (f.key !== resetKey && f.read().changed && !(f.key in changes))
+    keep[f.key] = f.raw();
+  const msg = SET_FIELDS.msg;
+  let r;
+  try { r = await jreq('POST', '/settings', changes); }
+  catch (err) { msg.className = 'fmsg bad'; msg.textContent = 'Save failed: ' + err; return; }
+  if (!r.ok) {
+    for (const f of SET_FIELDS) f.setError('');
+    showFieldErrors(SET_FIELDS, r.data.errors || {}, msg);
+    if (!r.data.errors) msg.textContent = r.data.error || 'HTTP ' + r.status;
+    return;
+  }
+  const keys = Object.keys(changes);
+  renderSettings(r.data, keep, (resetKey ? resetKey + ' reset to default.' : 'Saved.')
+      + effectNote(r.data.settings || {}, keys));
+  if (STATS) $('modelinfo').textContent = STATS.retrieval.replace('Index', '')
+      + ' retrieval · ' + r.data.backend + ' / ' + r.data.model;
+}
+
+// ---- collection modal: edit (PATCH), per-collection settings, delete
+const PERSONA = {};            // collection id → last persona object seen
+let CE_FIELDS = [], CE_META = [];
+
+async function openColEdit() {
+  if (!COL) return;
+  const cid = COL;
+  $('ceWrap').classList.add('open');
+  const body = $('ceBody');
+  body.textContent = 'Loading…';
+  await refreshColList();
+  const c = COLS.find(x => x.id === cid);
+  if (!c) { body.textContent = 'Unknown collection.'; return; }
+  let st = null;
+  try {
+    const r = await jreq('GET', apiFor(cid, '/settings'));
+    if (r.ok) st = r.data;
+  } catch (e) { /* section shows the error */ }
+  if (COL !== cid) return;
+  renderColEdit(c, st);
+}
+function closeColEdit() { $('ceWrap').classList.remove('open'); }
+
+function metaField(key, label, value, multi) {
+  const f = el('div', 'field');
+  f.appendChild(el('div', 'flab', label));
+  const ctl = el('div', 'ctl');
+  const input = document.createElement(multi ? 'textarea' : 'input');
+  if (!multi) input.type = 'text';
+  input.value = value || '';
+  ctl.appendChild(input);
+  f.appendChild(ctl);
+  const err = el('div', 'ferr');
+  f.appendChild(err);
+  return {el: f, key, input, orig: value || '',
+    setError(m) { err.textContent = m || ''; f.classList.toggle('bad', !!m); }};
+}
+
+function renderColEdit(c, st, notes) {
+  notes = notes || {};
+  const cid = c.id;
+  const body = $('ceBody');
+  body.textContent = '';
+  $('ceTitle').textContent = c.name;
+
+  // -- about
+  body.appendChild(el('h3', null, 'About this collection'));
+  CE_META = [metaField('name', 'Name', c.name),
+             metaField('description', 'Description', c.description, true),
+             metaField('author', 'Author (for single-author collections)', c.author)];
+  for (const f of CE_META) body.appendChild(f.el);
+  const pers = PERSONA[cid];
+  const pOn = pers ? !!pers.enabled
+                   : !!(STATS && STATS.id === cid && (STATS.modes || []).includes('persona'));
+  const pf = el('div', 'field');
+  const pl = document.createElement('label');
+  const pc = document.createElement('input');
+  pc.type = 'checkbox'; pc.checked = pOn;
+  pl.append(pc, document.createTextNode(' Enable persona mode'));
+  pf.appendChild(pl);
+  pf.appendChild(el('div', 'hint', 'First-person answers “as the author”, always labelled as '
+      + 'an AI reconstruction. Needs an author.'));
+  const perr = el('div', 'ferr');
+  pf.appendChild(perr);
+  body.appendChild(pf);
+  const mb = el('div', 'fbtns');
+  const msave = el('button', 'primary', 'Save details');
+  msave.type = 'button';
+  const mmsg = el('span', 'fmsg');
+  if (notes.meta) { mmsg.className = 'fmsg good'; mmsg.textContent = notes.meta; }
+  mb.append(msave, mmsg);
+  body.appendChild(mb);
+  msave.onclick = async () => {
+    const req = {};
+    for (const f of CE_META) {
+      f.setError('');
+      const v = f.key === 'name' ? f.input.value.trim() : f.input.value;
+      if (v !== f.orig) req[f.key] = v;
+    }
+    perr.textContent = '';
+    if (pc.checked !== pOn) {
+      const author = 'author' in req ? req.author : c.author;
+      if (pc.checked && !(author || '').trim()) {
+        perr.textContent = 'Set an author first — persona mode speaks as the author.';
+        return;
+      }
+      req.persona = Object.assign({}, PERSONA[cid] || {}, {enabled: pc.checked});
+    }
+    if (!Object.keys(req).length) { mmsg.className = 'fmsg'; mmsg.textContent = 'No changes.'; return; }
+    msave.disabled = true;
+    let r;
+    try { r = await jreq('PATCH', apiFor(cid, ''), req); }
+    catch (err) { r = {ok: false, status: 0, data: {error: String(err)}}; }
+    msave.disabled = false;
+    if (!r.ok) {
+      const errs = r.data.errors || {};
+      const left = [];
+      for (const [k, m] of Object.entries(errs)) {
+        const f = CE_META.find(x => x.key === k);
+        if (f) f.setError(m);
+        else if (k.startsWith('persona')) perr.textContent = k + ': ' + m;
+        else left.push(k + ': ' + m);
+      }
+      mmsg.className = 'fmsg bad';
+      mmsg.textContent = left.length ? left.join('; ')
+          : Object.keys(errs).length ? 'Please fix the highlighted fields.'
+          : (r.data.error || 'HTTP ' + r.status);
+      return;
+    }
+    const d = r.data;
+    PERSONA[cid] = d.persona || null;
+    Object.assign(c, {name: d.name, description: d.description, author: d.author});
+    await refreshColList();
+    if (COL === cid) await loadStats();      // persona mode / author may change
+    renderColEdit(c, st, {meta: 'Saved.'});
+  };
+
+  // -- per-collection settings
+  body.appendChild(el('h3', null, 'Retrieval & answer tuning for this collection'));
+  CE_FIELDS = [];
+  const smsg = el('span', 'fmsg');
+  if (!st || !st.settings) {
+    body.appendChild(el('div', 'fmsg bad', 'Could not load this collection’s settings.'));
+  } else {
+    body.appendChild(el('div', 'hint', 'Values shown are what this collection uses. '
+        + '“● changed” marks an override of the app-wide default (⚙ Settings → '
+        + 'Advanced); “↺ use app default” removes it.'));
+    const sp = st.settings;
+    const onReset = k => saveColSettings(c, {[k]: null}, k);
+    for (const k of Object.keys(sp)) {
+      const f = settingField(k, sp[k], {onReset, idPrefix: 'c-',
+        resetLabel: '↺ use app default', keep: (notes.keep || {})[k]});
+      CE_FIELDS.push(f);
+      body.appendChild(f.el);
+    }
+    const sb = el('div', 'fbtns');
+    const ssave = el('button', 'primary', 'Save tuning');
+    ssave.type = 'button';
+    if (notes.settings) { smsg.className = 'fmsg good'; smsg.textContent = notes.settings; }
+    ssave.onclick = () => {
+      const ch = changedValues(CE_FIELDS);
+      if (!Object.keys(ch).length) { smsg.className = 'fmsg'; smsg.textContent = 'No changes.'; return; }
+      saveColSettings(c, ch);
+    };
+    sb.append(ssave, smsg);
+    body.appendChild(sb);
+  }
+  CE_FIELDS.msg = smsg;
+
+  // -- delete
+  body.appendChild(el('h3', null, 'Delete'));
+  body.appendChild(el('div', 'hint', c.linked
+      ? 'Removes AnyRAG’s index and saved conversations (' + humanBytes(c.size_bytes)
+        + '). Your linked folder is never touched.'
+      : 'Removes the collection with its imported documents, index and saved '
+        + 'conversations (' + humanBytes(c.size_bytes) + ').'));
+  const db = el('div', 'fbtns');
+  const del = el('button', 'danger', 'Delete collection…');
+  del.type = 'button';
+  const dmsg = el('span', 'fmsg');
+  db.append(del, dmsg);
+  body.appendChild(db);
+  del.onclick = () => deleteCollection(cid, dmsg);
+}
+
+async function saveColSettings(c, changes, resetKey) {
+  const keep = {};
+  for (const f of CE_FIELDS) if (f.key !== resetKey && f.read().changed && !(f.key in changes))
+    keep[f.key] = f.raw();
+  const msg = CE_FIELDS.msg;
+  let r;
+  try { r = await jreq('POST', apiFor(c.id, '/settings'), changes); }
+  catch (err) { msg.className = 'fmsg bad'; msg.textContent = 'Save failed: ' + err; return; }
+  if (!r.ok) {
+    showFieldErrors(CE_FIELDS, r.data.errors || {}, msg);
+    if (!r.data.errors) msg.textContent = r.data.error || 'HTTP ' + r.status;
+    return;
+  }
+  renderColEdit(c, r.data, {keep, settings: (resetKey ? resetKey + ' now uses the app default.'
+      : 'Saved.') + effectNote(r.data.settings || {}, Object.keys(changes))});
+}
+
+async function deleteCollection(cid, msgEl) {
+  await refreshColList();
+  const c = COLS.find(x => x.id === cid);
+  if (!c) return;
+  if (c.ingesting) {
+    msgEl.className = 'fmsg bad';
+    msgEl.textContent = 'An ingest is running for this collection — cancel it first.';
+    return;
+  }
+  const text = 'Delete the collection “' + c.name + '”?\n\n' + (c.linked
+      ? 'This removes AnyRAG’s index, summaries and saved conversations for it ('
+        + humanBytes(c.size_bytes) + ' on disk).\n\nYour linked folder\n  ' + c.folder
+        + '\n(' + c.sources + ' document(s), ' + humanBytes(c.source_bytes)
+        + ') is NOT deleted or changed.'
+      : 'This permanently deletes its ' + c.sources + ' imported document(s) ('
+        + humanBytes(c.source_bytes) + '), its index and saved conversations — '
+        + humanBytes(c.size_bytes) + ' on disk in total.')
+      + '\n\nThis cannot be undone.';
+  if (!confirm(text)) return;
+  let r;
+  try { r = await jreq('DELETE', '/collections/' + encodeURIComponent(cid)); }
+  catch (err) { r = {ok: false, status: 0, data: {error: String(err)}}; }
+  if (!r.ok) {
+    msgEl.className = 'fmsg bad';
+    msgEl.textContent = 'Delete failed: ' + (r.data.error || 'HTTP ' + r.status);
+    return;
+  }
+  closeColEdit();
+  try { if (localStorage.getItem('anyrag-col') === cid) localStorage.removeItem('anyrag-col'); }
+  catch (e) {}
+  await loadCollections();
+}
+
 // --------------------------------------------------------------------- ask
 async function send(e) {
   e.preventDefault && e.preventDefault();
   if (!COL) { openWizard(); return false; }
   const question = $('q').value.trim();
   if (!question) return false;
+  if (ASK_CTRL) return false;                 // one answer at a time
   starters.style.display = 'none';
   quoteCard.style.display = 'none';
   addMsg('q', question);
-  $('q').value = ''; go.disabled = true;
+  $('q').value = '';
+  const ctrl = new AbortController();
+  ASK_CTRL = ctrl;
+  setAsking(true);
+  const prevConv = convId;
   const wait = addMsg('a thinking', 'Consulting the documents');
-  let meta = null, textNode = null, full = '', verify = null, citations = null;
+  let meta = null, body = null, full = '', verify = null, citations = null;
+  let failed = false, timer = null;
+  // live view while streaming: scholar/persona re-rendered as Markdown at
+  // most every 120 ms; quotes stay plain text until verification is in
+  const paint = () => {
+    timer = null;
+    if (!body) return;
+    if (meta && meta.mode !== 'quotes') {
+      body.textContent = '';
+      body.appendChild(renderMarkdown(full, meta.sources || []));
+    } else body.textContent = full;
+  };
+  const startBody = () => {
+    wait.classList.remove('thinking');
+    wait.textContent = '';
+    if (meta && meta.rewritten_question) wait.appendChild(searchedFor(meta.rewritten_question));
+    if (meta && meta.mode === 'persona') {
+      const tag = document.createElement('span');
+      tag.className = 'persona-tag';
+      tag.textContent = 'AI persona — reconstructed from the documents';
+      wait.appendChild(tag);
+      wait.appendChild(document.createElement('br'));
+    }
+    body = document.createElement('div');
+    wait.appendChild(body);
+  };
+  const handle = line => {
+    if (!line) return;
+    const ev = JSON.parse(line);
+    if (ev.type === 'meta') {
+      meta = ev;
+      if (ev.conversation_id) setConv(ev.conversation_id);
+      startBody();
+    } else if (ev.type === 'delta') {
+      if (!body) startBody();             // defensive: meta not seen yet
+      full += ev.text;
+      if (!timer) timer = setTimeout(paint, 120);
+    } else if (ev.type === 'verify') {
+      verify = ev.quotes;
+    } else if (ev.type === 'citations') {
+      citations = {used: ev.used || [], unused: ev.unused || [],
+                   out_of_range: ev.out_of_range || []};
+    } else if (ev.type === 'error') {
+      failed = true;
+      wait.classList.remove('thinking');
+      wait.className = 'msg err';
+      wait.textContent = ev.error;
+      body = null;
+    }
+  };
   try {
-    const r = await fetch(api('/ask'), {method:'POST',
+    const r = await fetch(api('/ask'), {method:'POST', signal: ctrl.signal,
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({question, mode, conversation_id: convId})});
+    if (!r.body) throw new Error('HTTP ' + r.status);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -886,71 +2153,54 @@ async function send(e) {
       buf += dec.decode(value, {stream: true});
       let nl;
       while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
+        handle(buf.slice(0, nl).trim());
         buf = buf.slice(nl + 1);
-        if (!line) continue;
-        const ev = JSON.parse(line);
-        if (ev.type === 'meta') {
-          meta = ev;
-          if (ev.conversation_id) setConv(ev.conversation_id);
-          wait.classList.remove('thinking');
-          wait.textContent = '';
-          if (ev.rewritten_question) wait.appendChild(searchedFor(ev.rewritten_question));
-          if (ev.mode === 'persona') {
-            const tag = document.createElement('span');
-            tag.className = 'persona-tag';
-            tag.textContent = 'AI persona — reconstructed from the documents';
-            wait.appendChild(tag);
-            wait.appendChild(document.createElement('br'));
-          }
-          textNode = document.createTextNode('');
-          wait.appendChild(textNode);
-        } else if (ev.type === 'delta') {
-          if (!textNode) {          // defensive: meta not seen yet
-            wait.classList.remove('thinking');
-            wait.textContent = '';
-            textNode = document.createTextNode('');
-            wait.appendChild(textNode);
-          }
-          textNode.data += ev.text;
-          full += ev.text;
-        } else if (ev.type === 'verify') {
-          verify = ev.quotes;
-        } else if (ev.type === 'citations') {
-          citations = {used: ev.used || [], unused: ev.unused || [],
-                       out_of_range: ev.out_of_range || []};
-        } else if (ev.type === 'error') {
-          wait.classList.remove('thinking');
-          wait.className = 'msg err';
-          wait.textContent = ev.error;
-          meta = null;
-        }
       }
       wait.scrollIntoView({behavior: 'instant', block: 'end'});
     }
-    if (meta && meta.mode !== 'quotes') {
-      // scholar/persona (and gated): streamed as plain text, now re-rendered
-      // through the same path a reopened saved turn uses.
+    handle(buf.trim());        // a final line without "\n" (e.g. a 409 body)
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (meta && !failed) {
+      // the same rendering path a reopened saved turn uses
       renderAnswer(wait, {mode: meta.mode, answer: full, sources: meta.sources || [],
-                          citations, rewritten_question: meta.rewritten_question});
-    } else {
-      if (meta && meta.mode === 'quotes' && full.includes('>')) {
-        const holder = document.createElement('div');
-        renderQuotes(holder, full, verify);
-        textNode.parentNode.replaceChild(holder, textNode);
-      }
-      if (meta && meta.sources && meta.sources.length)
-        wait.appendChild(sourcesBlock(meta.sources, false, null));
+                          verify, citations, rewritten_question: meta.rewritten_question});
     }
   } catch (err) {
-    wait.classList.remove('thinking');
-    wait.className = 'msg err';
-    wait.textContent = 'Request failed: ' + err;
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (err && err.name === 'AbortError') {
+      // Stop: keep what arrived, marked as stopped. The server drops the
+      // turn when the stream breaks, so a brand-new conversation id it
+      // announced is not kept.
+      if (!prevConv && convId && convId !== prevConv) setConv(null);
+      if (meta && !failed) {
+        renderAnswer(wait, {mode: meta.mode, answer: full, sources: meta.sources || [],
+                            verify: null, citations: null,
+                            rewritten_question: meta.rewritten_question, stopped: true});
+      } else if (!failed) {
+        wait.className = 'msg a prog';
+        wait.textContent = 'Stopped before the answer started.';
+      }
+    } else {
+      wait.classList.remove('thinking');
+      wait.className = 'msg err';
+      wait.textContent = 'Request failed: ' + err;
+    }
   }
-  go.disabled = false; $('q').focus();
+  ASK_CTRL = null;
+  setAsking(false);
+  $('q').focus();
   return false;
 }
 
+let ASK_CTRL = null;           // AbortController of the streaming /ask
+function stopAsk() { if (ASK_CTRL) ASK_CTRL.abort(); }
+function setAsking(on) {
+  go.style.display = on ? 'none' : '';
+  go.disabled = on;
+  $('stopBtn').style.display = on ? '' : 'none';
+}
+
+enableBrowse();               // pywebview may already be ready
 loadCollections();
 </script>
 </body>

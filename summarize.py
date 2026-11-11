@@ -172,11 +172,12 @@ def llm_reachable():
 
 
 def _manifest_key(col, key):
-    """Manifest entries are keyed by source FILENAME; map a chunk file's
-    artifact key back to it (sources may be .pdf/.md/.docx/…)."""
+    """Manifest entries are keyed by source name (relative path for a source
+    in a subfolder); map a chunk file's artifact key back to it."""
     for src in col.source_files():
-        if col.artifact_key(src.name) == key:
-            return src.name
+        name = col.source_name(src)
+        if col.artifact_key(name) == key:
+            return name
     return key
 
 
