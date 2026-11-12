@@ -13,6 +13,14 @@ cd "$(dirname "$0")/.."
 
 .venv/bin/pyinstaller --noconfirm anyrag.spec
 
+# The embedded LLM needs llama.cpp's native library inside the bundle
+# (anyrag.spec collects it; a missing one only shows up at the first question)
+if [ "$(uname)" = "Darwin" ]; then BUNDLE=dist/AnyRAG.app; else BUNDLE=dist/AnyRAG; fi
+if ! find "$BUNDLE" -path "*llama_cpp/lib/*" \( -name "libllama*" -o -name "llama*.dll" \) | grep -q .; then
+  echo "BUILD CHECK FAILED: llama_cpp/lib/libllama is missing from $BUNDLE" >&2
+  exit 1
+fi
+
 echo
 echo "Build complete:"
 if [ "$(uname)" = "Darwin" ]; then

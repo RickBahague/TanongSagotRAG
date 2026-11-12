@@ -321,18 +321,16 @@ def backend_status(backend=None, url=None, model=None, model_path=None,
            "reachable": False, "model_present": None, "models": None,
            "error": None}
     if backend == "embedded":
-        import importlib.util
         path = Path(model_path or config.get("LLM_MODEL_PATH"))
         exists = path.is_file()
-        has_lib = importlib.util.find_spec("llama_cpp") is not None
+        lib_err = rag.llama_cpp_error()     # imports it: catches a missing .dylib
         out.update(url=None, model=path.name, model_path=str(path),
-                   file_exists=exists, llama_cpp=has_lib,
-                   model_present=exists, reachable=exists and has_lib)
+                   file_exists=exists, llama_cpp=lib_err is None,
+                   model_present=exists, reachable=exists and lib_err is None)
         if not exists:
             out["error"] = f"model file missing: {path}"
-        elif not has_lib:
-            out["error"] = ("llama-cpp-python is not installed "
-                            "(pip install llama-cpp-python)")
+        elif lib_err:
+            out["error"] = lib_err
         return out
     if backend not in ("ollama", "openai"):
         out["error"] = f"unknown backend {backend!r}"

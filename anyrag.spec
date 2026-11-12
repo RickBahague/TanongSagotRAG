@@ -21,9 +21,21 @@ else:
           "ONNX encoder. Run scripts/fetch_model.py + scripts/export_onnx.py "
           "first, or ship an Ollama-only build.")
 
+# llama-cpp-python loads libllama/libggml* with ctypes from
+# <package>/lib at runtime; PyInstaller can't see that, and a hiddenimport
+# alone packs only the Python code ("Shared library with base name 'llama'
+# not found" in the app). Bundle the libraries at the same relative path.
+from PyInstaller.utils.hooks import collect_dynamic_libs
+binaries = collect_dynamic_libs("llama_cpp")
+if not any(Path(src).name.startswith("libllama") or
+           Path(src).name.startswith("llama") for src, _ in binaries):
+    print("WARNING: llama_cpp native libraries not found — the embedded "
+          "LLM backend will not work in this build.")
+
 a = Analysis(
     ["app.py"],
     pathex=[str(ROOT)],
+    binaries=binaries,
     datas=datas,
     hiddenimports=["llama_cpp", "onnxruntime", "tokenizers", "webview",
                    "docx"],

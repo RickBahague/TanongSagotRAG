@@ -2,6 +2,23 @@
 
 ## 2026-11-13
 
+### Bug fix — Desktop app: "Shared library with base name 'llama' not found"
+Reported from the packaged app: every question in a new collection failed
+with that message, so the built-in (embedded) model never worked.
+`anyrag.spec` listed `llama_cpp` only as a hidden import, which packs its
+Python code but not `libllama`/`libggml*`, which it loads with ctypes from
+`llama_cpp/lib` at runtime.
+- `anyrag.spec`: bundles those libraries via
+  `collect_dynamic_libs("llama_cpp")` (in `Frameworks/llama_cpp/lib`).
+- `scripts/build_desktop.sh`: fails the build if `libllama` is missing
+  from the bundle.
+- `rag.py` (`llama_cpp_error()`) and `serve.py`: a missing native library
+  now gives a clear message pointing to Settings, and `/backend/status`
+  ("Test connection") actually imports the library, so it no longer
+  reports the built-in model as reachable when it can't load.
+- Verified: a frozen probe built the same way loaded the bundled GGUF and
+  generated text. Tests: `tests/test_embedded_native_lib.py` (296 passed).
+
 ### Bug fix — Small models ignored the numbered citations
 Testing the app with real local models showed M3's `[n]` citations
 rarely appeared: with `qwen2.5:1.5b` only 3 of 15 answers cited, and the

@@ -845,12 +845,10 @@ def _embedded_llm():
     if _EMBEDDED_KEY is not None and _EMBEDDED_KEY != want:
         _EMBEDDED_LLM = None
     if _EMBEDDED_LLM is None:
-        try:
-            from llama_cpp import Llama
-        except ImportError:
-            raise RuntimeError(
-                "LLM_BACKEND is 'embedded' but llama-cpp-python is not "
-                "installed (pip install llama-cpp-python).")
+        err = llama_cpp_error()
+        if err:
+            raise RuntimeError(err)
+        from llama_cpp import Llama
         if not Path(want[0]).exists():
             raise RuntimeError(f"Model file missing: {want[0]}")
         kwargs = {"model_path": want[0], "n_ctx": want[1], "verbose": False}
@@ -859,6 +857,23 @@ def _embedded_llm():
         _EMBEDDED_LLM = Llama(**kwargs)
         _EMBEDDED_KEY = want
     return _EMBEDDED_LLM
+
+
+def llama_cpp_error():
+    """None when llama-cpp-python imports with its native library, else a
+    message for the user. Importing it loads libllama via ctypes, so a
+    package without its .dylib/.so fails with OSError/FileNotFoundError, not
+    ImportError (a desktop bundle missing the library did exactly that)."""
+    try:
+        import llama_cpp  # noqa: F401
+    except ImportError:
+        return ("LLM_BACKEND is 'embedded' but llama-cpp-python is not "
+                "installed (pip install llama-cpp-python).")
+    except Exception as e:
+        return ("The built-in model could not be loaded: llama.cpp's native "
+                f"library is missing or broken ({e}). Choose Ollama or an "
+                "OpenAI-compatible server in Settings, or reinstall the app.")
+    return None
 
 
 def _open(req, model):
