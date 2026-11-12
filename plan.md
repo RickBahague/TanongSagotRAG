@@ -187,6 +187,21 @@ reproduce (≈80–120×). The load-time gain varies between runs and is small.
 The review also fixed `search_idx` for k ≤ 0 to match the old slice
 semantics; no caller passes it.
 
+**MRR on collections, before → after** (added 2026-11-13; scratch home,
+sources linked read-only; "before" = the pre-M5-1 full-scan scorer run on
+the same chunks, "after" = `BM25Index`; k = 10):
+
+| Collection | Chunks | Questions | BM25 MRR before → after | hit@1 before → after | Top-10 lists identical |
+|---|---|---|---|---|---|
+| `ibon` (writings/IBON, 6 PDFs) | 15 | 10 | 0.9333 → 0.9333 | 0.90 → 0.90 | yes, all 15 questions (5 off-topic included) |
+| `fixtures` (test corpus, 5 files) | 12 | 15 | 0.9667 → 0.9667 | 0.9333 → 0.9333 | yes, all 20 questions |
+
+The full hybrid index gives the same MRR on both (IBON 0.9333, fixtures
+0.9667). **Verdict: kept.** M5-1 changes speed, not ranking, so equal MRR
+is the expected result. These are the only collections available; there is
+no real multi-document collection yet. M5-1 involves no reranker model, so
+nothing was downloaded.
+
 ## M5-2 eval — 2026-11-12 (P2-9: idf-weighted gate coverage, closest material, search-only mode)
 
 Label: fixture + IBON only; no real multi-document collection yet
@@ -518,3 +533,30 @@ I reviewed P2-5 on the current code (after M5-2…M5-5): postings, memo,
 about 110–120× faster. Load time with a warm cache is about the old
 build's time, not faster (as the first M5-1 run found). These are single
 runs on this machine.
+
+## Citation prompt — 2026-11-13 (M3 numbered citations with real small models)
+
+M3 numbered the excerpts `[1]…[n]` and asked for `[n]` markers in the
+system prompt, but it had only been tested against a fake LLM. With real
+1.5B models, most answers were uncited, and some were nothing but "[1]".
+Two changes in `rag.py`:
+- the excerpt header is `[1] Title — work, p. 3` instead of `[1] [Title —
+  work, p. 3]`; the nested brackets were being copied into answers;
+- numbered (scholar/persona) prompts end with `CITE_REMINDER`: answer in
+  your own words, put the excerpt number after each sentence, a neutral
+  worked example ("The bridge opened in 1932 [2]."), and "never reply with
+  only a number". A first version used a bee example, and the bundled model
+  copied it word for word into a bee answer, so the example must not come
+  from any corpus.
+
+Quotes mode is unchanged. Measured on the 15 on-topic fixture eval
+questions, scholar mode, collection of the 5 clean fixture files:
+
+| Backend | Answers citing correctly | Bare-marker answers | Header echoed |
+|---|---|---|---|
+| Ollama `qwen2.5:1.5b`, before → after | 3 → 14 | 1 → 0 | 0 → 0 |
+| Embedded GGUF (desktop default), before → after | 10 → 15 | 4 → 0 | 1 → 0 |
+
+Retrieval is unaffected: fixture eval unchanged (hit@10 1.0, MRR 0.967).
+Not yet measured on larger models or a real collection; no fallback for
+bare-marker answers was added, since none appeared after the change.

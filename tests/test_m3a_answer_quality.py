@@ -156,7 +156,7 @@ def test_citations_event(server, fake_llm, make_collection):
     ctx = ctx.rsplit("\n\nQuestion: ", 1)[0].split("\n\n---\n\n")
     assert len(ctx) == n
     for i, (part, src) in enumerate(zip(ctx, meta["sources"]), start=1):
-        assert part.startswith(f"[{i}] [")
+        assert part.startswith(f"[{i}] ") and not part.startswith(f"[{i}] [")
         assert by_id[src["id"]]["text"] in part
     # stored with the turn
     [turn] = conversations.load(col, meta["conversation_id"])
@@ -366,3 +366,18 @@ def test_cli_chat_followup_and_citation_warning(make_collection, fake_llm,
     assert "[1] " in out and "(not cited)" in out
     last = _answer_requests(fake_llm)[-1]["messages"][1]["content"]
     assert last.startswith("Earlier in this conversation:\nQ: " + BEES_Q)
+
+
+def test_numbered_prompt_ends_with_cite_reminder(make_collection):
+    # small models cite reliably only with the reminder as the last line
+    # (plan.md, "Citation prompt"); quotes mode keeps its own format
+    col = make_collection()
+    hits = rag.BM25Index(rag.load_chunks(col)).search(BEES_Q, 3)
+    sys_ = rag.system_scholar(col)
+    _, user, _, _ = rag.fit_prompt(sys_, BEES_Q, hits)
+    assert user.rstrip().endswith(rag.CITE_REMINDER)
+    assert "[1] [" not in user                  # no nested header brackets
+    _, quser, _, _ = rag.fit_prompt(rag.system_quotes(col), BEES_Q, hits,
+                                    numbered=False)
+    assert rag.CITE_REMINDER not in quser
+    assert quser.rstrip().endswith(BEES_Q)

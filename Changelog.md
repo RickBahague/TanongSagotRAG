@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-11-13
+
+### Bug fix — Small models ignored the numbered citations
+Testing the app with real local models showed M3's `[n]` citations
+rarely appeared: with `qwen2.5:1.5b` only 3 of 15 answers cited, and the
+bundled model answered 4 of 15 questions with nothing but "[1]". In
+`rag.py` the numbered excerpt header lost its nested brackets, and scholar
+and persona prompts now end with a short citation reminder that has a
+neutral example. Now 14/15 and 15/15 answers cite, with no bare-marker
+replies; quotes mode and retrieval are unchanged. Numbers in `plan.md`
+("Citation prompt"); test added in `tests/test_m3a_answer_quality.py`.
+
+### Feature — M5-1 eval: MRR measured on collections
+Requested as a goal: `plan.md`'s "M5-1 eval" section now records
+before/after MRR on the `ibon` and `fixtures` collections (old full-scan
+scorer vs the inverted index on the same chunks, in a scratch home):
+0.9333 → 0.9333 and 0.9667 → 0.9667, top-10 lists identical. Verdict
+unchanged: kept. No code changed.
+
 ## 2026-11-12
 
 ### Bug fix — M5 goal text in the implementation plan could not complete

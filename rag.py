@@ -1058,8 +1058,12 @@ def build_context(hits, numbered=True):
         label = c["essay"] if c["essay"] == work else f"{c['essay']} — {work}"
         y = chunk_year(c)
         year = f", {y}" if y else ""
-        num = f"[{i}] " if numbered else ""
-        parts.append(f"{num}[{label}{year}, {pages}]\n{c['text']}")
+        if numbered:
+            # "[1] Title, p. 3" — no nested brackets: small models copied
+            # "[1] [Title, p. 3]" headers into answers instead of citing
+            parts.append(f"[{i}] {label}{year}, {pages}\n{c['text']}")
+        else:
+            parts.append(f"[{label}{year}, {pages}]\n{c['text']}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -1205,14 +1209,28 @@ def _words(text):
     return len(text.split())
 
 
-def user_prompt(context, question, history_text="", standalone=None):
+# Last line of numbered (scholar/persona) prompts. Small models (1.5B)
+# ignored the system prompt's citation rule, or answered with a bare "[1]";
+# a short reminder with a worked example right before the answer fixes most
+# of both (measured: see plan.md, "Citation prompt").
+CITE_REMINDER = ("Answer in your own words in a few sentences. After each "
+                 "sentence, put the number of the excerpt it is based on in "
+                 "square brackets, like this: The bridge opened in 1932 [2]. "
+                 "Never reply with only a number.")
+
+
+def user_prompt(context, question, history_text="", standalone=None,
+                numbered=False):
     """User message: optional recent conversation, the excerpts, and the
-    question (with its standalone rewrite when there is one)."""
+    question (with its standalone rewrite when there is one); numbered
+    prompts end with CITE_REMINDER."""
     head = (f"Earlier in this conversation:\n{history_text}\n\n"
             if history_text else "")
     q = f"{question}\n(Standalone form: {standalone})" if standalone \
         else question
-    return f"{head}Excerpts from the documents:\n\n{context}\n\nQuestion: {q}"
+    tail = f"\n\n{CITE_REMINDER}" if numbered and context else ""
+    return (f"{head}Excerpts from the documents:\n\n{context}\n\n"
+            f"Question: {q}{tail}")
 
 
 def _order_for_prompt(hits, question):
@@ -1258,7 +1276,8 @@ def fit_prompt(system, question, hits, history=None, numbered=True,
     def build(kept, turns=()):
         ordered = _order_for_prompt(kept, oq)
         user = user_prompt(build_context(ordered, numbered), question,
-                           _history_text(turns, answer_words), standalone)
+                           _history_text(turns, answer_words), standalone,
+                           numbered=numbered)
         ok = (sys_words + _words(user)) * _TOK_PER_WORD_X100 <= budget_x100
         return ok, ordered, user
 
