@@ -83,6 +83,15 @@
   .src:hover::after { opacity:.8; }
   .src .n { display:inline-block; min-width:1.8em; color:var(--accent2); font-weight:600; }
   .src.unused { opacity:.5; }
+  /* search-only results and "closest material" (P2-9) */
+  .hits { margin-top:8px; font-size:14px; }
+  .hits .hd { font:13px system-ui, sans-serif; color:var(--muted); margin-bottom:4px; }
+  .hit { margin:8px 0 0; padding:6px 10px; border-left:3px solid var(--line); cursor:pointer; }
+  .hit:hover { border-left-color:var(--accent); }
+  .hit .t b { color:var(--ink); font-weight:600; }
+  .hit .t { font-size:13.5px; color:var(--muted); }
+  .hit .snip { margin-top:2px; color:var(--ink); }
+  #searchBtn { background:var(--accent2); }
   .src.unused::after { content:' — not cited'; opacity:.8; }
   .src.unused:hover::after { content:' — not cited · read ▸'; }
   a.cite { color:var(--accent2); text-decoration:none; font-weight:600; cursor:pointer;
@@ -320,6 +329,8 @@
   <div class="bar">
     <input id="q" placeholder="Ask this collection…" autocomplete="off" autofocus>
     <button id="go">Ask</button>
+    <button type="button" id="searchBtn" title="Search only: list the matching passages without asking the model"
+            onclick="searchOnly()">Search</button>
     <button type="button" id="stopBtn" title="Stop generating" style="display:none"
             onclick="stopAsk()">■ Stop</button>
     <button type="button" id="addColBtn" title="New collection" onclick="openWizard()">＋</button>
@@ -1441,6 +1452,8 @@ function renderAnswer(el, turn) {
   if (warn) { el.appendChild(document.createElement('br')); el.appendChild(warn); }
   if (turn.sources && turn.sources.length)
     el.appendChild(sourcesBlock(turn.sources, numbered, cits));
+  if (turn.closest && turn.closest.length)     // gated out (P2-9)
+    el.appendChild(passageList(turn.closest, 'Closest material in this collection:'));
   if (turn.answer) el.appendChild(answerActions(turn.answer));
 }
 
@@ -1578,6 +1591,66 @@ function sourcesBlock(sources, numbered, citations) {
     det.appendChild(d);
   }
   return det;
+}
+
+// Ranked passages (search-only results, "closest material"). DOM only:
+// titles and snippets are corpus text and go in via textContent.
+function passageList(items, heading) {
+  const box = el('div', 'hits');
+  if (heading) box.appendChild(el('div', 'hd', heading));
+  for (const [i, s] of items.entries()) {
+    const d = el('div', 'hit');
+    const t = el('div', 't');
+    t.appendChild(el('span', 'n', '[' + (i + 1) + '] '));
+    t.appendChild(el('b', null, s.essay || ''));
+    const pg = s.page_start === s.page_end ? 'p. ' + s.page_start
+             : 'pp. ' + s.page_start + '–' + s.page_end;
+    const work = s.work || (s.source || '').replace(/\.[^.]+$/, '');
+    t.appendChild(document.createTextNode(
+      (s.essay === work ? '' : ' — ' + work) +
+      (s.year ? ' (' + s.year + ')' : '') + ', ' + pg));
+    d.appendChild(t);
+    if (s.snippet) d.appendChild(el('div', 'snip', s.snippet));
+    if (s.id) { d.title = 'Read this passage'; d.onclick = () => openReader(s.id); }
+    box.appendChild(d);
+  }
+  return box;
+}
+
+// Search-only mode (P2-9): retrieve and list passages, no model call; not
+// saved in the conversation.
+async function searchOnly() {
+  if (!COL) { openWizard(); return; }
+  const question = $('q').value.trim();
+  if (!question || ASK_CTRL) return;
+  starters.style.display = 'none';
+  quoteCard.style.display = 'none';
+  addMsg('q', question);
+  $('q').value = '';
+  const box = addMsg('a thinking', 'Searching the documents');
+  const btn = $('searchBtn');
+  btn.disabled = true;
+  try {
+    const r = await jreq('POST', api('/search'), {question});
+    box.classList.remove('thinking');
+    box.textContent = '';
+    if (!r.ok) {
+      box.className = 'msg err';
+      box.textContent = (r.data && r.data.error) || ('Search failed: HTTP ' + r.status);
+    } else {
+      const res = r.data.results || [];
+      let head = 'Search only — no model call · ' + res.length +
+                 (res.length === 1 ? ' passage' : ' passages');
+      if (!r.data.covered) head += ' · weak match: the collection may not cover this';
+      if (res.length) box.appendChild(passageList(res, head));
+      else box.appendChild(el('div', 'prog', 'No matching passages.'));
+    }
+  } catch (err) {
+    box.className = 'msg err';
+    box.textContent = 'Search failed: ' + err;
+  }
+  btn.disabled = false;
+  $('q').focus();
 }
 
 // ------------------------------------------------- settings forms (P3-1)
@@ -2163,7 +2236,8 @@ async function send(e) {
     if (meta && !failed) {
       // the same rendering path a reopened saved turn uses
       renderAnswer(wait, {mode: meta.mode, answer: full, sources: meta.sources || [],
-                          verify, citations, rewritten_question: meta.rewritten_question});
+                          verify, citations, rewritten_question: meta.rewritten_question,
+                          closest: meta.closest || []});
     }
   } catch (err) {
     if (timer) { clearTimeout(timer); timer = null; }
@@ -2197,6 +2271,7 @@ function stopAsk() { if (ASK_CTRL) ASK_CTRL.abort(); }
 function setAsking(on) {
   go.style.display = on ? 'none' : '';
   go.disabled = on;
+  $('searchBtn').disabled = on;
   $('stopBtn').style.display = on ? '' : 'none';
 }
 

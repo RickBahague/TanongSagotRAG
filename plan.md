@@ -134,3 +134,387 @@ Hybrid equals BM25 on hit@k/MRR here (corpora too small to discriminate);
 it improves recall@10 on the fixture and fixes the ice-cores false reject
 through the dense gate. Verify yardstick (`tests/eval_fixture.py`, HybridIndex):
 hit@1 0.933, hit@10 1.0, MRR 0.967, FA 0, FR 0.
+
+## M5-1 eval — 2026-11-12 (P2-5: inverted-index BM25, gate reuses hits, token cache)
+
+Keep-if rule: identical rankings on the fixtures, faster on a synthetic
+50k-chunk corpus. **Kept.**
+
+- `BM25Index` keeps an inverted index (term → postings `(doc, tf)`) and
+  scores only the docs that hold a query term. It uses the same float
+  expression in the same query-token order as the old full scan, and ties
+  still break on `(score, idx)`, so scores and rankings are identical.
+  Per-query scores are memoized, so the gate and the retrieval that follows
+  it score a question once. `gate_ok`/`bm25_gate_ok` also accept the
+  caller's hits (`bm25_hits=` / `hits=`) instead of searching again.
+- Token cache: `data/cache/tokens/<artifact key>.json`, one file per chunk
+  file, holding `tokenize(text)` per chunk. It is keyed by sha256 of the
+  chunk texts plus `TOKENIZER_VERSION` and a stopword-list fingerprint.
+  Section titles are always re-tokenized (they can change without the chunk
+  file changing). A corrupt or mismatched cache is rebuilt silently, and
+  files for removed sources are deleted when the index loads.
+
+**Fixture eval** (`tests/eval_fixture.py`, before → after): output JSON
+byte-identical — HybridIndex, hit@1 0.933, hit@3 1.0, hit@10 1.0, MRR 0.967,
+gate false-accepts 0, false-rejects 0. Test check against a verbatim copy of
+the old scorer (`tests/test_m5_1_bm25.py`): identical (score, id) lists on
+every fixture eval question at k = 1/3/10/all, and on a 650-chunk random
+Zipfian corpus with forced ties (150 queries × 4 k values).
+
+**Synthetic 50k-chunk benchmark** (stdlib only, 100–200 words per chunk,
+Zipfian vocabulary of 30k words, seed 42, 200 queries of 2–7 terms; script
+kept outside the repo):
+
+| | old (full scan) | new (inverted index) |
+|---|---|---|
+| top-10 rank mismatches (200 queries) | — | **0** |
+| search k=10, median / p95 | 28.4 / 39.8 ms | **0.29 / 1.77 ms** |
+| gate + search (ask path), median / p95 | 60.1 / 80.1 ms | **0.51 / 2.91 ms** |
+| index load, warm token cache | 2.96 s (build) | **2.16 s** (1.67 s with GC off) |
+| index load, cold (tokenize + write cache) | 2.81 s | 4.36 s, once per changed chunk file |
+
+The cache saves tokenization (≈1.9 s of the old build), but building the
+postings lists then takes most of the load (≈1.1–1.8 s). Next step if load
+time matters: cache the postings themselves, or build them with GC paused.
+The cold path is slower once, because it also writes the cache. All numbers
+are from one run on this machine.
+
+**Independent re-run** (M5-1 subagent review, same scripts): 0 rank
+mismatches; search 28.2 → 0.34 ms median; gate + search 58.0 → 0.49 ms;
+old build 2.62 s vs new warm-cache load 2.52 s (bench script), or 1.64 s
+when the load is measured on its own (prof2). The search and gate speedups
+reproduce (≈80–120×). The load-time gain varies between runs and is small.
+The review also fixed `search_idx` for k ≤ 0 to match the old slice
+semantics; no caller passes it.
+
+## M5-2 eval — 2026-11-12 (P2-9: idf-weighted gate coverage, closest material, search-only mode)
+
+Label: fixture + IBON only; no real multi-document collection yet
+(EVAL_COLLECTION unset).
+
+Keep-if rule: gate false-accepts down, false-rejects not up. **Gate part
+reverted (FR went up). Closest material and search-only kept.**
+
+**Labelled sets.** The M2-C pairs, re-measured on the current code: (a)
+fixture eval on the clean collection, (b) the fixture questions asked of the
+5 single-topic collections, (c) IBON's 10 on-topic + 5 off-topic questions,
+(d) the 15 on-topic fixture questions asked of IBON. Because FA was already 0
+on these for the hybrid gate, two harder off-topic sets that share words with
+the corpus were written BEFORE the change and not edited afterwards: (e) 15
+questions asked of the clean fixture collection ("How do I bake a molten lava
+cake?", "Who is the current queen of Denmark?", …) and (f) 15 asked of IBON
+("What is the minimum wage in Germany?", "Which jobs are best for
+introverts?", …). Both gates were measured: hybrid (`gate_ok`, what the app
+runs with vectors) and BM25-only (`bm25_gate_ok`, what a collection without
+vectors runs). Scripts and sets: scratchpad `m5/gate_measure.py`,
+`hard_fix.jsonl`, `hard_ibon.jsonl` (outside the repo).
+
+**Tried: idf-weighted coverage** — each query term weighted by its BM25 idf,
+and a term the corpus never contains weighted by the idf of df = 0. Same
+MIN_COVERAGE (0.5), no threshold tuned.
+
+| Gate, sets | FA before → after | FR before → after |
+|---|---|---|
+| hybrid, a–d (110 neg / 40 pos) | 0 → 0 | 0 → **2** |
+| hybrid, a–f (140 neg / 40 pos) | 1 → **0** | 0 → **2** |
+| BM25-only, a–d | 1 → **0** | 2 → **9** |
+| BM25-only, a–f | 5 → **1** | 2 → **9** |
+
+Fixture yardstick with the change: FR 0 → 1 ("What happens when a colony
+loses its queen?"). FA falls as intended (the lava-cake hybrid false accept,
+the glaciers "pyroclastic flows" BM25 false accept), but question words the
+corpus lacks ("happens", "loses", "extracted") get the largest weight, so
+on-topic questions whose content words are covered now fail coverage. That
+is the same mechanism that rejects "capital of Mongolia", so it can't be
+fixed by picking a different weight without tuning to these sets. Rule not
+met → `rag.py` restored from the snapshot. The code is kept in the
+scratchpad (`m5/rag_idfgate_tried.py`) for later.
+
+**Kept (no gate change):**
+- *Closest material*: a gated-out question returns `closest`, the 3
+  nearest passages, one per section (`rag.closest_material`). It's in the
+  `/ask` `meta` event, and the UI lists it under the refusal ("Closest
+  material in this collection:"), each entry opening the reader. No model
+  call. Not saved in the conversation file (`conversations.py` is not an
+  M5-2 file), so a reopened gated turn shows only the refusal.
+- *Search-only*: `POST /c/<id>/search {question, k?}` →
+  `{question, covered, results[]}` (`rag.search_passages`), using the same
+  pool → rerank → per-source cap as `/ask`, with no follow-up rewrite and no
+  model call. `covered` is the gate's verdict, shown as a "weak match" note
+  and never used to filter. UI: a "Search" button beside Ask. Rendering is
+  DOM-only (textContent), with no innerHTML of corpus text.
+- Both run after or beside `gate_ok` and never change what it decides:
+  gate decisions are identical before and after on all 180 labelled pairs
+  (sets a–f, both gates), and the fixture eval JSON is byte-identical
+  (HybridIndex, hit@1 0.933, hit@3 1.0, hit@10 1.0, MRR 0.967, FA 0, FR 0).
+
+Tests: `tests/test_m5_2_search.py` (14). UI checked with `node --check` and
+a DOM-stub run of `passageList` / `renderAnswer` / `searchOnly` (scratchpad
+`m5/ui_m52.js`). There was no browser click-through.
+
+## M5-3 eval — 2026-11-12 (P2-3: heading segmentation for PDF/HTML/TXT/DOCX)
+
+Label: fixture + IBON only; no real multi-document collection yet
+(EVAL_COLLECTION unset).
+
+Keep-if rule: fewer sources on segmentation rung `none`, hit@k not lower.
+**Kept.**
+
+- PDF: new ladder rung `fonts` between `match` and `none`. It reads font
+  size and weight through the pypdf text visitor and groups runs into lines
+  by y. A heading line is all bold, or ≥ 1.2 × the body size (the size that
+  carries the most characters). It must also be ≤ 12 words, contain
+  letters, and not end in `. , ; :`. A candidate found on more than one page
+  is a running header/footer and is skipped. Consecutive heading lines merge
+  into one title.
+- TXT: setext (`===`/`---` underline, dropped), `#`/`##`, ALL-CAPS and
+  numbered (`2.1 …`, `Chapter 4`) lines, only at a paragraph start.
+- HTML: `<h1>`/`<h2>`; heading text is taken out of the body.
+- DOCX: Heading 2 added to Title/Heading 1.
+- Every format needs ≥ 2 headings, else it stays `none` with its old
+  output. Heuristic headings (txt, pdf `fonts`) must also head a real
+  section: ≥ 40 words (= MIN_CHUNK_WORDS), with a prose line (≥ 6 words)
+  among the next 3; otherwise the line stays body text. Thresholds were set
+  before measuring, not tuned.
+- `SEGMENTER_VERSION = 2` is recorded per source in the manifest. Sources
+  chunked before it re-chunk once on the next plain ingest; vectors follow,
+  because they are keyed by the chunk-file hash.
+
+**Rung per source** (fresh scratch homes; fixture = all 8 `CORPUS_FILES`):
+
+| Corpus | rung `none` before → after | chunks before → after |
+|---|---|---|
+| fixture (8 sources) | 4 → 4 | 16 → 16 |
+| IBON (6 PDFs) | **6 → 4** | **14 → 15** |
+| total | **10 → 8** | |
+
+The fixture's 4 `none` sources have no headings to find:
+`lighthouses.html` has a single `<h1>`, and `volcanoes.txt`, `report.txt`
+and `tiny.txt` are plain paragraphs. They are correctly unchanged, and the
+fixture chunks are identical. On IBON, 2 PDFs moved to `fonts`:
+- "PH is upper middle-income…": real subheadings found ("Upper
+  middle-class", "Borrowing scorecard", "Hostile witness"), 4 chunks
+  (unchanged count).
+- "Upper middle-income, Lower-end reality": sections are the nav front
+  matter (61 words), "Upper middle-income, Lower-" (the article body, 833
+  words), and "SONNY AFRICA" (author bio + footer, 43 words). The title is
+  cut off because pypdf joins the title's second line with the date
+  ("end realityJuly 6, 2026"), so it no longer matches the heading line, and
+  the byline counts as a heading. Usable, not clean.
+- **14 → 15 chunks** because of the second PDF: the 61-word nav and the
+  43-word bio/footer are now their own chunks instead of sharing windows
+  with the body.
+
+The other 4 IBON PDFs are single web articles. Their only large heading is
+the title, which pypdf places after page 1's body in content order, so they
+correctly stay `none`.
+
+**Retrieval** (`eval.py --json --variants` on IBON; `tests/eval_fixture.py`):
+
+| | hit@1 | hit@3 | hit@10 | recall@10 | MRR | FA | FR |
+|---|---|---|---|---|---|---|---|
+| IBON bm25 before → after | 0.90 → 0.90 | 1.0 → 1.0 | 1.0 → 1.0 | 0.967 → 0.956 | 0.933 → 0.933 | 0 → 0 | 0 → 0 |
+| IBON hybrid before → after | 0.90 → 0.90 | 1.0 → 1.0 | 1.0 → 1.0 | 0.967 → 0.956 | 0.933 → 0.933 | 0 → 0 | 0 → 0 |
+| fixture (HybridIndex) | 0.933 → 0.933 | 1.0 → 1.0 | 1.0 → 1.0 | — | 0.967 → 0.967 | 0 → 0 | 0 → 0 |
+
+hit@k did not drop. recall@10 dipped slightly because one more chunk now
+matches an expectation pattern; it is not part of the keep-if rule. Fixture
+eval JSON is byte-identical.
+
+Not done: replacing `clean_page`'s odd-page header heuristic with
+frequency-based header/footer stripping. It would change the `meta` and
+`outline` rung output of existing books, and there is no real book
+collection to measure it on. The `fonts` rung only uses frequency to reject
+repeated heading candidates; it does not strip them from the text.
+
+Tests: `tests/test_m5_3_segmentation.py` (11). Covers generated TXT, HTML,
+DOCX and a two-font PDF with a running header, list items that are not
+headings, the re-chunk on the old segmenter version, and no lost lines.
+
+## M5-4 eval — 2026-11-12 (P2-4: paragraph-aware chunking with explicit offsets)
+
+Label: fixture + IBON only; no real multi-document collection yet
+(EVAL_COLLECTION unset).
+
+Keep-if rule: `passage()` round trip still exact, hit@k not lower. **Kept.**
+
+- `ingest.chunk_spans`: a window is never longer than CHUNK_WORDS. Its end
+  moves back by at most 10% of CHUNK_WORDS (`BOUNDARY_TOLERANCE`) to the
+  latest paragraph start, else the latest sentence end, else it is cut at
+  CHUNK_WORDS as before. The next window starts CHUNK_OVERLAP_WORDS before
+  that end, moved forward to the first sentence/paragraph start inside the
+  overlap, so overlap is ≤ the setting. Sentence ends skip initials and a
+  short list of abbreviations (`St.`, `Dr.`, `e.g.`, …).
+- Windows never lie inside the previous one, so the "drop a short
+  redundant tail window" rule is gone and no word is lost.
+- Each chunk stores `start`/`end` word offsets, and the id stays
+  `<prefix>-<section>-<start>`. `rag.passage()` stitches with the offsets
+  (`_overlap`: overlap = prev.end − start; a gap shows `[…]`). Chunk files
+  without offsets (pre-P2-4) still use the fixed-step arithmetic.
+  `SEGMENTER_VERSION` is now 3, so existing sources re-chunk once.
+- Tolerance: 20% was the first choice. Simulated on `volcanoes.txt` at
+  50/10, it makes 4 chunks where `tests/test_reader.py` pins 3, so 10% was
+  used. 10% also cuts mid-sentence less often than 20% shortens chunks.
+
+**Round trip** (every section, cited first/middle/last chunk, whole
+section stitched vs the section's words re-extracted from the source):
+
+| Collection, CHUNK_WORDS/overlap | exact before | exact after | chunks before → after | windows ending at a sentence |
+|---|---|---|---|---|
+| fixture (8 sources), 450/80 | 48/48 | 48/48 | 16 → 16 | 16 → 16 |
+| fixture, 50/10 | 48/48 | 48/48 | 34 → 35 | 16 → 20 |
+| IBON, 450/80 | 33/33 | 33/33 | 15 → 15 | 8 → 12 |
+| IBON, 120/20 | 33/33 | 33/33 | 46 → 45 | 11 → 19 |
+
+**Retrieval** (`eval.py --json --variants`; fixture also via
+`tests/eval_fixture.py`):
+
+| | hit@1 | hit@3 | hit@10 | recall@10 | MRR | FA / FR |
+|---|---|---|---|---|---|---|
+| fixture yardstick (450/80, HybridIndex) | 0.933 → 0.933 | 1.0 → 1.0 | 1.0 → 1.0 | — | 0.967 → 0.967 | 0/0 → 0/0 |
+| fixture 50/10, bm25 | 1.0 → 1.0 | 1.0 → 1.0 | 1.0 → 1.0 | 0.817 → 0.817 | 1.0 → 1.0 | 0/1 → 0/1 |
+| fixture 50/10, hybrid | 1.0 → 1.0 | 1.0 → 1.0 | 1.0 → 1.0 | 0.978 → 0.978 | 1.0 → 1.0 | 0/0 → 0/0 |
+| IBON 450/80, bm25 | 0.90 → 0.90 | 1.0 → 1.0 | 1.0 → 1.0 | 0.956 → 0.956 | 0.933 → 0.933 | 0/0 → 0/0 |
+| IBON 450/80, hybrid | 0.90 → 0.90 | 1.0 → 1.0 | 1.0 → 1.0 | 0.956 → **0.989** | 0.933 → 0.933 | 0/0 → 0/0 |
+| IBON 120/20, bm25 | 0.90 → 0.90 | 1.0 → 1.0 | 1.0 → 1.0 | 0.819 → 0.819 | 0.95 → 0.95 | 0/0 → 0/0 |
+| IBON 120/20, hybrid | 0.90 → 0.90 | 1.0 → 1.0 | 1.0 → 1.0 | 0.856 → **0.881** | 0.95 → 0.95 | 0/0 → 0/0 |
+
+Fixture yardstick JSON is byte-identical: every fixture section fits in one
+450-word window.
+
+Open issue (not an M5-4 file): `summarize.py:article_text` still trims
+overlap with the fixed-step test (`start diff == CHUNK_WORDS −
+CHUNK_OVERLAP_WORDS`). On re-chunked sources that test rarely holds, so
+each section summary's input repeats the overlap words. That is harmless to
+correctness but wasteful. Fix: stitch with `start`/`end` (as
+`rag._overlap` does). Reported to the orchestrator.
+
+Tests: `tests/test_m5_4_chunking.py` (14). Covers span coverage and size
+limits for 5 settings, paragraph-over-sentence preference, the overlap
+start snap, abbreviations, stored offsets, exact round trip (whole section
+and ±1 window), paragraph breaks, the gap marker, a legacy fixed-window
+chunk file, and the re-chunk on the old segmenter version.
+
+## M5-5 eval — 2026-11-12 (P2-6: Unicode tokenizer, per-collection stopwords)
+
+Label: fixture + IBON only; no real multi-document collection yet
+(EVAL_COLLECTION unset).
+
+Keep-if rule: English numbers unchanged, non-ASCII fixture passes. **Kept.**
+
+- `rag.tokenize`: NFKC, then casefold, then tokens are runs of Unicode
+  letters/digits (`\w` minus `_`), combining marks (so Indic vowel signs
+  and virama stay inside the word) and apostrophes. On ASCII text this is
+  exactly the old `[a-z0-9']+` over `lower()`. Stemming and the
+  length > 1 filter are unchanged. Accents are not folded: `été` ≠ `ete`,
+  and all-caps Greek without tonos ≠ the accented form. CJK runs without
+  spaces become one token each (not addressed).
+- Per-collection stopwords: optional `<collection>/stopwords.txt` (one word
+  per line, `#` comments, `-word` removes a default), normalized like the
+  text. `BM25Index` carries its list (`.stopwords`, `.tokenize`). Query
+  tokens, the gate's coverage and `SummaryIndex` all use it. The token-cache
+  tag fingerprints the collection's list, so editing the file rebuilds the
+  cache. It is a file rather than a setting because the settings schema
+  lives in `config.py`, which is outside M5-5's files, so the settings
+  API/UI can't edit it yet.
+- `TOKENIZER_VERSION` 1 → 2, so every token cache rebuilds once.
+
+**English numbers** (before → after):
+- Fixture yardstick: byte-identical (HybridIndex, hit@1 0.933, hit@3 1.0,
+  hit@10 1.0, MRR 0.967, FA 0, FR 0). Fixture chunks: 0 of 16 token lists
+  changed.
+- IBON (`eval.py --variants`): unchanged. bm25 and hybrid both hit@1 0.90,
+  hit@3 1.0, hit@10 1.0, MRR 0.933, FA 0, FR 0; recall@10 0.956 (bm25) /
+  0.989 (hybrid). IBON's PDFs use ﬁ/ﬂ ligatures, so 13 of 15 chunks' token
+  lists did change ("ﬁnancial" was indexed as "nancial", now "financial";
+  "classi"+"cation" → "classification"). On these 10 questions that changes
+  no ranking.
+- M5-2 gate pairs (180 labelled pairs, sets a–f, hybrid and BM25-only):
+  every decision identical (hybrid FA 1/140, FR 0/40; BM25-only FA 5/140,
+  FR 2/40).
+
+**Non-ASCII fixture** (`tests/test_m5_5_tokenizer.py`, generated in the test;
+not in `CLEAN_FILES`): French (accents), Greek (non-Latin) and German (ß,
+ﬁ ligature) Markdown next to the 5 English fixture files, with 5 questions
+(top-1 section + gate) and 2 off-topic ones (BM25 gate).
+- Before (old `rag.py` in a scratch copy): 6 failed / 7 passed. Both Greek
+  questions had no tokens at all.
+- After: 13 passed, 1 xfailed.
+- The strict xfail is a known limit that is not the tokenizer: the English
+  bge-small encoder gives any Greek question cosine 0.73–0.77 to the Greek
+  chunks, which is above `DENSE_SOLO_SIM` (0.72). The hybrid gate therefore
+  accepts off-topic Greek ("Τι είναι η κβαντική φυσική;"), while the BM25
+  gate rejects it. Fix: a multilingual `EMBED_MODEL` (bge-m3 /
+  multilingual-e5-small, P2-6's second half). That needs a model download,
+  so it was not done.
+
+Tests: `tests/test_m5_5_tokenizer.py` (13 + 1 strict xfail). Also covers
+ASCII equality with a verbatim copy of the old tokenizer, the stopwords
+file (add/remove, cache tag, BM25 gate) and the version bump.
+
+## M5-6 eval — 2026-11-12 (P2-7: ONNX reranker)
+
+Label: fixture + IBON only; no real multi-document collection yet
+(EVAL_COLLECTION unset).
+
+**Not run:** needs a reranker model download, which needs the user's
+approval; keep-if (MRR up on a real collection) also needs a real
+collection.
+
+- `models/` holds only `encoder-onnx/` (bge-small-en-v1.5) and the Qwen
+  GGUF. There is no cross-encoder ONNX model.
+- A Hugging Face cache copy of `cross-encoder/ms-marco-MiniLM-L-6-v2`
+  exists outside the repo (`/Volumes/APFS/LLMs/huggingface/hub/`), but it
+  has `model.safetensors` only, no ONNX. Exporting it needs torch /
+  sentence-transformers, which are not installed and may not be added.
+  Using or exporting it is the user's call.
+- No code changed for M5-6. `_maybe_rerank` still needs
+  sentence-transformers, so reranking stays off in the bundle.
+
+## M5-1 re-check (M5 agent) — 2026-11-12
+
+Label: fixture + IBON only; no real multi-document collection yet
+(EVAL_COLLECTION unset).
+
+I reviewed P2-5 on the current code (after M5-2…M5-5): postings, memo,
+`search_idx`, `doc_tokens_of`, the token cache, `bm25_gate_ok(hits=)` and
+`gate_ok(bm25_hits=)`. The core holds:
+- Memo keys are the index's own tokens.
+- The cache is keyed by chunk text only, so M5-4's `start`/`end` fields
+  don't touch it.
+- The cache tag carries tokenizer v2 and the stopword fingerprint.
+- `closest_material` / `search_passages` reuse the memoized scoring.
+
+**Fixes (both from M5-5, with tests in `tests/test_m5_1_bm25.py`):**
+1. Dense-only retrieval: the gate's fallback `BM25Index(dn.chunks)` ignored
+   the collection's `stopwords.txt`. It now uses `collection_stopwords(col)`.
+   Also, `collection_stopwords(None)` no longer reads a `stopwords.txt`
+   from the working directory.
+2. Speed: tokenizer v2's Unicode regex is about 3× slower than
+   `[a-z0-9']+`, which pushed the uncached 50k build from 3.25 s to 4.89 s.
+   ASCII text now takes an exact fast path (NFKC is the identity on ASCII,
+   casefold equals lower, and the mark ranges are ≥ U+0300). A test checks
+   it against the general path on 3,000 random ASCII strings plus the eval
+   questions.
+
+**Keep-if, re-measured on the current code:**
+- Identical rankings on the fixtures: the reference-scorer tests pass (fixture
+  questions at k = 1/3/10/all, and the 650-chunk random corpus with ties).
+  `tests/eval_fixture.py` is byte-identical to M5-5's after-JSON (hit@1
+  0.933, hit@10 1.0, MRR 0.967, FA 0, FR 0).
+- Synthetic 50k chunks (`bench_bm25.py`; old = pre-M5 `rag.py` with
+  tokenizer v1). Rank mismatches top-10: **0 / 200**. The corpus is ASCII,
+  so v1 and v2 tokens are identical.
+
+| | old | new (M5 final) |
+|---|---|---|
+| search k=10, median / p95 | 28.2 / 35.5 ms | **0.26 / 1.69 ms** |
+| gate + search, median / p95 | 56.8 / 72.6 ms | **0.46 / 2.29 ms** |
+| build, no cache | 2.75 s | 3.15 s (4.89 s before fix 2) |
+| load, warm token cache | — | 2.70 s |
+| load, cold (tokenize + write cache) | — | 3.88 s |
+
+**Verdict: kept.** Rankings are identical, and search and the ask path are
+about 110–120× faster. Load time with a warm cache is about the old
+build's time, not faster (as the first M5-1 run found). These are single
+runs on this machine.

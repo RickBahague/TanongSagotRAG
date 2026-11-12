@@ -24,13 +24,18 @@ manifest per source:
   outline  the PDF's own bookmarks/outline
   toc      numbered-TOC parse with printed-page offset detection
   match    TOC titles matched against page heads (ebook-style)
+  fonts    heading lines found by font size / bold weight (P2-3)
   none     whole file as one section
-.md segments on #/## headings; .docx on Heading styles; .txt/.html are
-single-section.
+.md segments on #/## headings; .docx on Title/Heading 1/Heading 2 styles;
+.html on <h1>/<h2>; .txt on setext, ALL-CAPS, numbered or '#' heading lines
+(rung "headings"). Every format needs >= 2 headings, else rung "none".
+Heuristic headings (txt, pdf fonts) must also head a real section: at least
+SECTION_MIN_WORDS words, starting with prose (see _split_on_headings).
 """
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -280,9 +285,59 @@ def clean_page(text, printed_page, book_title):
 
 
 def chunk_words(words, size, overlap):
+    """Fixed windows (the pre-P2-4 chunker; kept for reference/tools)."""
     step = size - overlap
     for start in range(0, max(len(words) - overlap, 1), step):
         yield start, words[start:start + size]
+
+
+# P2-4: paragraph/sentence-aware windows. A window is never longer than
+# `size`; its end moves back (by at most BOUNDARY_TOLERANCE x size words)
+# to the latest paragraph start, else the latest sentence end, else it is
+# cut at `size` as before. The next window starts `overlap` words before
+# that end, moved forward to the first sentence/paragraph start inside the
+# overlap when there is one (so overlap <= `overlap`). Every chunk stores
+# its explicit [start, end) word offsets; passage() stitches with them.
+BOUNDARY_TOLERANCE = 0.1
+_SENT_END = re.compile(r"[.!?][\"'”’)\]»]*$")
+_INITIAL = re.compile(r"^[A-Z]\.$")                # 'J.' in 'J. Doe'
+_ABBREVS = {"st.", "mt.", "dr.", "mr.", "mrs.", "ms.", "jr.", "sr.", "no.",
+            "vol.", "pp.", "p.", "vs.", "e.g.", "i.e.", "fig.", "cf.",
+            "ft.", "approx.", "ca."}
+
+
+def sentence_starts(words):
+    """Offsets i such that words[i-1] ends a sentence (initials and common
+    abbreviations such as 'St.' or 'e.g.' do not)."""
+    return {i + 1 for i, w in enumerate(words)
+            if _SENT_END.search(w) and not _INITIAL.match(w)
+            and w.lower() not in _ABBREVS}
+
+
+def chunk_spans(words, size, overlap, paras=(), sentences=None):
+    """[(start, end)] windows covering every word of `words` (see above)."""
+    n = len(words)
+    if n == 0:
+        return []
+    paras = set(paras)
+    sents = sentence_starts(words) if sentences is None else set(sentences)
+    tol = max(1, int(size * BOUNDARY_TOLERANCE))
+    spans, start = [], 0
+    while True:
+        e0 = start + size
+        if e0 >= n:
+            spans.append((start, n))
+            return spans
+        lo = max(start + 1, e0 - tol)
+        cand = range(e0, lo - 1, -1)
+        end = (next((e for e in cand if e in paras), None)
+               or next((e for e in cand if e in sents), None) or e0)
+        spans.append((start, end))
+        nxt = end - overlap
+        if overlap > 0:
+            nxt = next((b for b in range(max(end - overlap, start + 1), end)
+                        if b in paras or b in sents), nxt)
+        start = nxt if nxt > start else end
 
 
 _PARA_END = tuple('.!?”")»')
@@ -471,6 +526,170 @@ def _auto_sections(reader):
     return None, None
 
 
+# ------------------------------------------ heading-based segmentation --
+# P2-3. Version of the segmentation + chunking code: recorded in the
+# manifest, and a source chunked by an older version re-chunks once
+# (chunk_is_current). 2 = heading segmentation (P2-3), 3 = boundary-aware
+# windows with explicit start/end offsets (P2-4).
+SEGMENTER_VERSION = 3
+SECTION_MIN_WORDS = 40          # = MIN_CHUNK_WORDS: a heading must head this
+HEAD_MAX_WORDS = 12
+HEAD_SIZE_RATIO = 1.2           # PDF: font >= 1.2 x body size = heading
+PROSE_MIN_WORDS = 6             # a line this long counts as prose
+_HEAD_END = tuple(".,;:")       # a line ending like this is a sentence
+
+
+def _norm_line(s):
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _heading_text_ok(s):
+    """Short, has letters, not sentence-final: could be a heading line."""
+    s = _norm_line(s)
+    w = s.split()
+    return (1 <= len(w) <= HEAD_MAX_WORDS and len(s) <= 100
+            and any(ch.isalpha() for ch in s) and not s.endswith(_HEAD_END))
+
+
+def _split_on_headings(lines, heads, default_title, validate=True):
+    """lines: [(page_label, line)], heads: set of indices of heading lines.
+    Consecutive heading lines form one title (a heading wrapped over two
+    lines). With `validate`, a title is kept only when it heads a real
+    section — >= SECTION_MIN_WORDS words before the next title, and one of
+    its next 3 non-empty lines is prose (>= PROSE_MIN_WORDS words) — other
+    titles go back into the body text. None unless >= 2 titles remain;
+    else [(title, [(page_label, text), …])], with text before the first
+    title as a section named `default_title` (when it has any words)."""
+    heads = set(heads)
+    while True:
+        groups, i = [], 0               # [(first, last)] of title runs
+        while i < len(lines):
+            if i in heads:
+                j = i
+                while j + 1 < len(lines) and j + 1 in heads:
+                    j += 1
+                groups.append((i, j))
+                i = j + 1
+            else:
+                i += 1
+        if not validate:
+            break
+        bad = set()
+        for g, (a, b) in enumerate(groups):
+            end = groups[g + 1][0] if g + 1 < len(groups) else len(lines)
+            body = [ln for _, ln in lines[b + 1:end] if ln.strip()]
+            n_words = sum(len(ln.split()) for ln in body)
+            prose = any(len(ln.split()) >= PROSE_MIN_WORDS for ln in body[:3])
+            if n_words < SECTION_MIN_WORDS or not prose:
+                bad.update(range(a, b + 1))
+        if not bad:
+            break
+        heads -= bad
+    if len(groups) < 2:
+        return None
+    out = []
+
+    def emit(title, part):
+        pages = []
+        for label, ln in part:
+            if pages and pages[-1][0] == label:
+                pages[-1][1].append(ln)
+            else:
+                pages.append((label, [ln]))
+        pages = [(lb, "\n".join(ls)) for lb, ls in pages]
+        if any(t.strip() for _, t in pages):
+            out.append((title, pages))
+    emit(default_title, lines[:groups[0][0]])
+    for g, (a, b) in enumerate(groups):
+        end = groups[g + 1][0] if g + 1 < len(groups) else len(lines)
+        title = _norm_line(" ".join(ln for _, ln in lines[a:b + 1]))
+        emit(title, lines[b + 1:end])
+    return out
+
+
+def _bold_font(font):
+    try:
+        name = str((font or {}).get("/BaseFont", ""))
+    except Exception:
+        return False
+    return bool(re.search(r"bold|black|heavy|semibold|demi", name, re.I))
+
+
+def _pdf_heading_lines(reader):
+    """{page index: set of normalized heading-line texts}, from font size
+    and weight (pypdf text visitor). A line is a heading candidate when
+    every run on it is bold, or its size is >= HEAD_SIZE_RATIO x the body
+    size (the size carrying the most characters), and its text passes
+    _heading_text_ok. A candidate text found on more than one page is a
+    running header/footer, not a heading."""
+    per_page, sizes = [], {}
+    for page in reader.pages:
+        lines = []                       # [y, [text], [size], all_bold]
+
+        def visit(text, cm, tm, font, size, lines=lines):
+            if not text or not text.strip():
+                return
+            try:
+                scale = math.hypot(tm[2] * cm[0] + tm[3] * cm[2],
+                                   tm[2] * cm[1] + tm[3] * cm[3]) or 1.0
+                y = round(tm[4] * cm[1] + tm[5] * cm[3] + cm[5], 0)
+            except Exception:
+                scale, y = 1.0, None
+            fs = round(float(size or 0) * scale, 1)
+            bold = _bold_font(font)
+            for part in text.split("\n"):
+                if not part.strip():
+                    continue
+                if lines and lines[-1][0] == y and y is not None:
+                    ln = lines[-1]
+                    ln[1].append(part); ln[2].append(fs); ln[3] &= bold
+                else:
+                    lines.append([y, [part], [fs], bold])
+                sizes[fs] = sizes.get(fs, 0) + len(part.strip())
+        try:
+            page.extract_text(visitor_text=visit)
+        except Exception:
+            pass
+        per_page.append(lines)
+    if not sizes:
+        return {}
+    body = max(sizes.items(), key=lambda kv: kv[1])[0]
+    cands, seen_on = {}, {}
+    for pi, lines in enumerate(per_page):
+        for _, parts, fss, bold in lines:
+            text = _norm_line("".join(parts))
+            if not _heading_text_ok(text):
+                continue
+            if bold or min(fss) >= body * HEAD_SIZE_RATIO:
+                cands.setdefault(pi, set()).add(text)
+                seen_on.setdefault(text, set()).add(pi)
+    return {pi: {t for t in ts if len(seen_on[t]) == 1}
+            for pi, ts in cands.items()}
+
+
+def _font_sections(reader, work):
+    """Ladder rung 'fonts': split the flat page text at heading lines found
+    by _pdf_heading_lines. None when fewer than 2 headings survive."""
+    try:
+        heads_by_page = _pdf_heading_lines(reader)
+    except Exception:
+        return None
+    if not heads_by_page:
+        return None
+    lines, heads = [], set()
+    for i, page in enumerate(reader.pages, start=1):
+        raw = page.extract_text() or ""
+        if not raw.strip():
+            continue
+        text = re.sub(r"[ \t]+", " ", raw).strip()   # same as the flat rung
+        want = heads_by_page.get(i - 1, set())
+        for ln in text.splitlines():
+            if want and _norm_line(ln) in want:
+                heads.add(len(lines))
+            lines.append((i, ln))
+    return _split_on_headings(lines, heads, work)
+
+
 def sections_from_pdf(col, path, meta):
     """(rung, generator of (section_title, [(page_label, text), ...]))."""
     from pypdf import PdfReader
@@ -521,6 +740,10 @@ def sections_from_pdf(col, path, meta):
             yield from sections.values()
         return rung, gen_auto()
 
+    fonts = _font_sections(reader, work)
+    if fonts:
+        return "fonts", iter(fonts)
+
     # last resort: one section, pdf page numbers
     def gen_flat():
         pages = []
@@ -556,7 +779,7 @@ def sections_from_markdown(path):
 
 
 def sections_from_docx(path):
-    """Segment a .docx on Heading 1/Title styles (python-docx)."""
+    """Segment a .docx on Title/Heading 1/Heading 2 styles (python-docx)."""
     try:
         import docx
     except ImportError:
@@ -567,7 +790,8 @@ def sections_from_docx(path):
     for p in d.paragraphs:
         style = (p.style.name or "") if p.style else ""
         text = p.text.strip()
-        if style.startswith(("Heading 1", "Title")) and text:
+        if (style in ("Title", "Heading 1", "Heading 2")
+                or style.startswith(("Heading 1 ", "Heading 2 "))) and text:
             if buf:
                 sections.append((current or path.stem, "\n".join(buf)))
             current, buf = text, []
@@ -594,10 +818,14 @@ class _HTMLText(HTMLParser):
     _BREAK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4",
               "blockquote", "section", "article"}
 
+    _HEADS = {"h1", "h2"}
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts, self._skip, self.title = [], 0, ""
         self._in_title = False
+        # P2-3: [(first part index, end part index)] of each <h1>/<h2>
+        self.heads, self._hstart = [], None
 
     def handle_starttag(self, tag, attrs):
         if tag in self._SKIP:
@@ -606,12 +834,17 @@ class _HTMLText(HTMLParser):
             self._in_title = True
         if tag in self._BREAK:
             self.parts.append("\n\n")
+        if tag in self._HEADS and not self._skip and self._hstart is None:
+            self._hstart = len(self.parts)
 
     def handle_endtag(self, tag):
         if tag in self._SKIP and self._skip:
             self._skip -= 1
         if tag == "title":
             self._in_title = False
+        if tag in self._HEADS and self._hstart is not None:
+            self.heads.append((self._hstart, len(self.parts)))
+            self._hstart = None
         if tag in self._BREAK:
             self.parts.append("\n\n")
 
@@ -621,21 +854,95 @@ class _HTMLText(HTMLParser):
         elif not self._skip:
             self.parts.append(data)
 
-    def text(self):
-        t = "".join(self.parts)
+    @staticmethod
+    def _clean(parts):
+        t = "".join(parts)
         t = re.sub(r"[ \t]+", " ", t)
         return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+    def text(self):
+        return self._clean(self.parts)
+
+    def sections(self, default_title):
+        """[(heading, body text)] split at <h1>/<h2> (heading text taken
+        out of the body); text before the first heading is a section named
+        `default_title`. None unless >= 2 headings head non-empty text."""
+        heads = [(a, b) for a, b in self.heads
+                 if _norm_line(self._clean(self.parts[a:b]))]
+        out = []
+        pre = self._clean(self.parts[:heads[0][0]]) if heads else ""
+        for n, (a, b) in enumerate(heads):
+            end = heads[n + 1][0] if n + 1 < len(heads) else len(self.parts)
+            body = self._clean(self.parts[b:end])
+            if body:
+                out.append((_norm_line(self._clean(self.parts[a:b])), body))
+        if len(out) < 2:
+            return None
+        return ([(default_title, pre)] if pre else []) + out
 
 
 def sections_from_html(path):
     p = _HTMLText()
     p.feed(path.read_text(errors="replace"))
     title = re.sub(r"\s+", " ", p.title).strip() or path.stem
+    secs = p.sections(title)
+    if secs:
+        return "headings", iter([(t, [(1, body)]) for t, body in secs])
     return "none", iter([(title, [(1, p.text())])])
 
 
+_TXT_SETEXT = re.compile(r"^\s*(=+|-+)\s*$")
+_TXT_NUMBERED = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*\.?|[IVXLC]+\.|(?:chapter|section|part)\s+"
+    r"(?:\d+|[IVXLC]+)\b[.:]?)\s+\S", re.I)
+
+
+def _txt_heading_kind(line):
+    s = line.strip()
+    if _MD_HEADING.match(s):
+        return "md"
+    if not _heading_text_ok(s):
+        return None
+    letters = [ch for ch in s if ch.isalpha()]
+    if len(letters) >= 3 and all(ch.isupper() for ch in letters):
+        return "caps"
+    if _TXT_NUMBERED.match(s):
+        return "numbered"
+    return None
+
+
 def sections_from_text(path):
+    """Plain text: heading lines are setext (a line underlined with ===/---,
+    3+ characters), '#'/'##' lines, ALL-CAPS lines or numbered lines
+    ('2.1 Methods', 'Chapter 4'), each starting a paragraph (file start or
+    after a blank line) and passing _heading_text_ok. They must head a real
+    section (_split_on_headings); >= 2 needed, else one section."""
     text = path.read_text(errors="replace")
+    raw = text.splitlines()
+    lines, heads = [], set()
+    i = 0
+    while i < len(raw):
+        ln = raw[i]
+        at_para = i == 0 or not raw[i - 1].strip()
+        nxt = raw[i + 1] if i + 1 < len(raw) else ""
+        if (at_para and ln.strip() and _heading_text_ok(ln)
+                and _TXT_SETEXT.match(nxt) and len(nxt.strip()) >= 3):
+            heads.add(len(lines))
+            lines.append((1, ln.strip()))
+            i += 2                        # drop the underline
+            continue
+        kind = _txt_heading_kind(ln) if at_para else None
+        if kind:
+            heads.add(len(lines))
+            title = _MD_HEADING.match(ln.strip()).group(1) \
+                if kind == "md" else ln.strip()
+            lines.append((1, title))
+        else:
+            lines.append((1, ln))
+        i += 1
+    secs = _split_on_headings(lines, heads, path.stem) if heads else None
+    if secs:
+        return "headings", iter(secs)
     return "none", iter([(path.stem, [(1, text)])])
 
 
@@ -724,6 +1031,7 @@ def chunk_is_current(col, path, prev, src_sha256=None, params=None,
     if id_prefix is None:
         id_prefix = chunk_id_prefix(col, path)
     return (prev.get("src_sha256") == sha
+            and prev.get("segmenter", 1) == SEGMENTER_VERSION
             and prev.get("chunk_params") == (params or chunk_params(col))
             and prev.get("id_prefix", path.stem[:ID_PREFIX_LEN]) == id_prefix)
 
@@ -765,26 +1073,20 @@ def chunk_source(col, path, force=False, *, prev=None, src_sha256=None,
             title = _unique_titles(seen_titles, raw_title)
             tid = raw_title[:40] + title[len(raw_title):]
             words, word_pages, paras = words_with_paras(pages)
-            prev_end = 0               # end offset of the last kept window
-            for start, ck in chunk_words(words, chunk_w, overlap_w):
-                if not ck:
-                    continue
-                # a short window is kept unless every word in it is already
-                # in the previous chunk: the first window of a section is
-                # always kept, and no word of a section is ever lost
-                if (len(ck) < MIN_CHUNK_WORDS and start > 0
-                        and start + len(ck) <= prev_end):
-                    continue
-                prev_end = start + len(ck)
+            # P2-4: boundary-aware windows with explicit word offsets; no
+            # window lies inside the previous one, so none is dropped
+            for start, end in chunk_spans(words, chunk_w, overlap_w, paras):
+                ck = words[start:end]
                 cid = f"{id_prefix}-{tid}-{start}"
                 f.write(json.dumps({
                     "id": cid,
                     "text": " ".join(ck),
                     "essay": title,
                     "page_start": word_pages[start],
-                    "page_end": word_pages[min(start + len(ck) - 1,
-                                               len(word_pages) - 1)],
+                    "page_end": word_pages[end - 1],
                     "source": name,
+                    "start": start,
+                    "end": end,
                 }, ensure_ascii=False) + "\n")
                 rel = sorted(p - start for p in paras if start < p < start + len(ck))
                 if rel:
@@ -931,7 +1233,7 @@ def record_chunked(entry, res, now, src_sha256, params, id_prefix):
     _, n, rung = res
     entry.update({"chunked_at": now, "n_chunks": n, "segmentation": rung,
                   "src_sha256": src_sha256, "chunk_params": params,
-                  "id_prefix": id_prefix})
+                  "id_prefix": id_prefix, "segmenter": SEGMENTER_VERSION})
     entry.pop("error", None)
     if n == 0:
         entry["no_text"] = True       # e.g. a scanned / image-only PDF

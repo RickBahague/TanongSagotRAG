@@ -9,10 +9,12 @@ Retrieval (config.RETRIEVAL):
 
 Generation supports streaming (llm_stream / ask_stream) and blocking (ask).
 """
+import heapq
 import json
 import math
 import re
 import threading
+import unicodedata
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -38,9 +40,69 @@ def _light_stem(w):
     return w
 
 
-def tokenize(text):
-    return [_light_stem(w) for w in re.findall(r"[a-z0-9']+", text.lower())
-            if w not in STOPWORDS and len(w) > 1]
+# P2-6: Unicode tokens. Text is NFKC-normalized (ligatures, full-width
+# forms, composed accents) and casefolded (ß → ss, final ς → σ); a token is
+# a run of Unicode letters/digits (\w minus "_"), combining marks (so
+# Indic vowel signs stay inside their word) and apostrophes. On ASCII text
+# this is exactly the old [a-z0-9']+ over text.lower().
+def _mark_class():
+    out, start = [], None
+    for cp in range(0x300, 0x10000):
+        is_mark = unicodedata.category(chr(cp)).startswith("M")
+        if is_mark and start is None:
+            start = cp
+        elif not is_mark and start is not None:
+            out.append(f"\\u{start:04x}-\\u{cp - 1:04x}" if cp - 1 > start
+                       else f"\\u{start:04x}")
+            start = None
+    return "".join(out)
+
+
+_TOKEN_RX = re.compile(r"(?:[^\W_]|['" + _mark_class() + r"])+")
+_ASCII_TOKEN_RX = re.compile(r"[a-z0-9']+")
+
+
+def normalize_text(text):
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def tokenize(text, stopwords=None):
+    """Index/query tokens. `stopwords`: a collection's list
+    (collection_stopwords); default STOPWORDS."""
+    sw = STOPWORDS if stopwords is None else stopwords
+    if text.isascii():
+        # exact fast path: on ASCII, NFKC is the identity, casefold ==
+        # lower, and _TOKEN_RX == [a-z0-9']+ (its mark ranges are >= U+0300)
+        # — ~3x faster, which keeps uncached index builds at M5-1 speed
+        words = _ASCII_TOKEN_RX.findall(text.lower())
+    else:
+        words = _TOKEN_RX.findall(normalize_text(text))
+    return [_light_stem(w) for w in words if w not in sw and len(w) > 1]
+
+
+def collection_stopwords(col):
+    """Stopwords of one collection: STOPWORDS edited by an optional
+    <collection>/stopwords.txt — one word per line, '#' comments, a word
+    is added, '-word' removes a default (e.g. '-not' to index 'not').
+    Words are normalized like text (NFKC + casefold)."""
+    sw = set(STOPWORDS)
+    root = getattr(col, "root", None)
+    if not root:                       # no collection: defaults, no file
+        return frozenset(sw)
+    path = Path(root) / "stopwords.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    for ln in lines:
+        ln = ln.split("#", 1)[0].strip()
+        if not ln:
+            continue
+        if ln.startswith("-"):
+            sw.discard(normalize_text(ln[1:].strip()))
+        else:
+            sw.add(normalize_text(ln))
+    return frozenset(sw)
 
 
 # ------------------------------------------------- per-collection settings --
@@ -167,41 +229,226 @@ def load_chunks(col):
 
 # ------------------------------------------------------------------- BM25 --
 
+# P2-5: bump when tokenize()/_light_stem() change so on-disk token caches
+# (data/cache/tokens/) are rebuilt. The stopword list is fingerprinted into
+# the cache key separately (_tokenizer_tag), so editing it also invalidates.
+TOKENIZER_VERSION = 2          # 2: Unicode tokenizer (P2-6)
+
+
+def _tokenizer_tag(stopwords=None):
+    import hashlib
+    words = STOPWORDS if stopwords is None else stopwords
+    sw = hashlib.sha256(" ".join(sorted(words)).encode()).hexdigest()[:16]
+    return f"v{TOKENIZER_VERSION}-{sw}"
+
+
 class BM25Index:
     """Section titles are indexed WITH the chunk text — segmentation strips
     headings from the body, so 'deep sea mining' must still match a chunk
-    whose section is titled that even when the body words differ."""
+    whose section is titled that even when the body words differ.
 
-    def __init__(self, chunks):
+    Inverted index (P2-5): `postings[term]` = [(doc idx, tf), …] in doc
+    order; a query scores only the docs in its terms' postings. Scores are
+    the same float expression, summed in the same (query-token) order as a
+    full scan, and ties break the same way ((score, idx) descending), so
+    rankings are identical to the pre-P2-5 scan.
+
+    `text_tokens` (optional, aligned with `chunks`): tokenize(c["text"]) per
+    chunk, e.g. from the on-disk token cache; the section title is always
+    tokenized here (it can change in memory without the chunk file
+    changing). tokenize(a + ". " + b) == tokenize(a) + tokenize(b) because
+    ". " never belongs to a token."""
+
+    _MEMO_SIZE = 16
+
+    def __init__(self, chunks, text_tokens=None, stopwords=None):
         self.chunks = chunks
-        self.docs = [tokenize(c.get("essay", "") + ". " + c["text"])
-                     for c in chunks]
-        self.doc_len = [len(d) for d in self.docs]
-        self.avg_len = sum(self.doc_len) / max(len(self.docs), 1)
-        self.tf = [Counter(d) for d in self.docs]
-        df = Counter()
-        for d in self.docs:
-            df.update(set(d))
-        n = len(self.docs)
-        self.idf = {t: math.log(1 + (n - f + 0.5) / (f + 0.5)) for t, f in df.items()}
+        self.stopwords = frozenset(STOPWORDS if stopwords is None
+                                   else stopwords)
+        if text_tokens is None or len(text_tokens) != len(chunks):
+            text_tokens = [self.tokenize(c["text"]) for c in chunks]
+        essay_toks = {}
+        docs = []
+        for c, tt in zip(chunks, text_tokens):
+            e = c.get("essay", "")
+            et = essay_toks.get(e)
+            if et is None:
+                et = essay_toks[e] = self.tokenize(e)
+            docs.append(et + tt if et else list(tt))
+        self.docs = docs
+        self.doc_len = [len(d) for d in docs]
+        n = len(docs)
+        self.avg_len = sum(self.doc_len) / max(n, 1)
+        postings = {}
+        for i, d in enumerate(docs):
+            for t, f in Counter(d).items():
+                p = postings.get(t)
+                if p is None:
+                    postings[t] = [(i, f)]
+                else:
+                    p.append((i, f))
+        self.postings = postings
+        self.idf = {t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5))
+                    for t, p in postings.items()}
+        self._weights = {}            # term -> [(idx, contribution)], lazy
+        self._wkey = None             # (K1, B) the weights were built with
+        self._memo = {}               # (query tokens, K1, B) -> [(s, idx)]
+        self._lock = threading.Lock()
+        self._pos = None              # id(chunk) -> idx, lazy
+        self._tf = None
+
+    def tokenize(self, text):
+        """tokenize() with this index's stopword list (P2-6)."""
+        return tokenize(text, self.stopwords)
+
+    @property
+    def tf(self):
+        """Per-doc term counts (pre-P2-5 attribute; built on first use)."""
+        if self._tf is None:
+            self._tf = [Counter(d) for d in self.docs]
+        return self._tf
+
+    def _term_weights(self, t, k1, b):
+        w = self._weights.get(t)
+        if w is None:
+            idf = self.idf.get(t, 0)
+            dl, avg = self.doc_len, self.avg_len
+            # the exact expression of the old full scan, per (doc, term)
+            w = [(i, idf * (f * (k1 + 1))
+                  / (f + k1 * (1 - b + b * dl[i] / avg)))
+                 for i, f in self.postings.get(t, ())]
+            self._weights[t] = w
+        return w
+
+    def _scored(self, q):
+        """All (score, idx) with score > 0 for query tokens `q` (unsorted).
+        Memoized per query so the gate and the retrieval that follows it
+        (ask_stream; HybridIndex's BM25 leg) score a question only once."""
+        k1, b = config.BM25_K1, config.BM25_B
+        key = (tuple(q), k1, b)
+        with self._lock:
+            hit = self._memo.get(key)
+            if hit is not None:
+                return hit
+            if self._wkey != (k1, b):
+                self._weights, self._wkey = {}, (k1, b)
+            acc = {}
+            for t in q:                    # query order, duplicates too
+                for i, v in self._term_weights(t, k1, b):
+                    acc[i] = acc.get(i, 0.0) + v
+            scored = [(s, i) for i, s in acc.items() if s > 0]
+            if len(self._memo) >= self._MEMO_SIZE:
+                self._memo.pop(next(iter(self._memo)))
+            self._memo[key] = scored
+            return scored
+
+    def search_idx(self, query, k=None):
+        """[(score, doc idx)] best-first; same ranking as search()."""
+        k = _cfg(self, "TOP_K") if k is None else k
+        scored = self._scored(self.tokenize(query))
+        if k is None or k >= len(scored):
+            return sorted(scored, reverse=True)
+        if k <= 0:                      # old scores[:k] slice semantics
+            return sorted(scored, reverse=True)[:k]
+        return heapq.nlargest(k, scored)
 
     def search(self, query, k=None):
-        k = _cfg(self, "TOP_K") if k is None else k
-        q = tokenize(query)
-        scores = []
-        for i, tf in enumerate(self.tf):
-            s = 0.0
-            for t in q:
-                if t not in tf:
-                    continue
-                num = tf[t] * (config.BM25_K1 + 1)
-                den = tf[t] + config.BM25_K1 * (1 - config.BM25_B
-                        + config.BM25_B * self.doc_len[i] / self.avg_len)
-                s += self.idf.get(t, 0) * num / den
-            if s > 0:
-                scores.append((s, i))
-        scores.sort(reverse=True)
-        return [(s, self.chunks[i]) for s, i in scores[:k]]
+        return [(s, self.chunks[i]) for s, i in self.search_idx(query, k)]
+
+    def doc_tokens_of(self, chunk):
+        """Indexed tokens (title + text) of one of this index's chunks, or
+        None when `chunk` is not one of them."""
+        if self._pos is None:
+            self._pos = {id(c): i for i, c in enumerate(self.chunks)}
+        i = self._pos.get(id(chunk))
+        return None if i is None or self.chunks[i] is not chunk \
+            else self.docs[i]
+
+
+# --------------------------------------------------------- token cache --
+# Derived data only: <col.data_dir>/cache/tokens/<artifact key>.json, one
+# file per chunk file, holding tokenize(c["text"]) for each chunk. Keyed by
+# a sha256 of exactly what is tokenized (the chunk texts of that file, in
+# order) + the tokenizer tag; any mismatch, parse error or count mismatch
+# → rebuild silently. Files whose key has no chunk file anymore are removed
+# at load time (ingest's prune only knows library.DERIVED_FILES).
+
+def _token_cache_dir(col):
+    return Path(col.data_dir) / "cache" / "tokens"
+
+
+def _texts_hash(chunks):
+    import hashlib
+    h = hashlib.sha256()
+    for c in chunks:
+        h.update(c["text"].encode("utf-8", "surrogatepass"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def _read_token_cache(path, digest, n, tag=None):
+    tag = _tokenizer_tag() if tag is None else tag
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        if d.get("tag") != tag or d.get("hash") != digest:
+            return None
+        lens, docs = d["lens"], d["docs"]
+        if len(lens) != n or len(docs) != n:
+            return None
+        out = []
+        for ln, s in zip(lens, docs):
+            toks = s.split(" ") if ln else []
+            if len(toks) != ln:
+                return None
+            out.append(toks)
+        return out
+    except Exception:
+        return None
+
+
+def _write_token_cache(path, digest, toks, tag=None):
+    import os
+    tag = _tokenizer_tag() if tag is None else tag
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}."
+                             f"{threading.get_ident()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"tag": tag, "hash": digest,
+                       "lens": [len(t) for t in toks],
+                       "docs": [" ".join(t) for t in toks]}, fh)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
+def cached_text_tokens(col, sources, stopwords=None):
+    """tokenize(c["text"], stopwords) for every chunk of `sources`
+    (load_sources order), from the per-chunk-file cache where it is still
+    valid (the cache tag fingerprints the stopword list)."""
+    cdir = _token_cache_dir(col)
+    tag = _tokenizer_tag(stopwords)
+    out, live = [], set()
+    for key, chunks, _ in sources:
+        live.add(key + ".json")
+        path = cdir / (key + ".json")
+        digest = _texts_hash(chunks)
+        toks = _read_token_cache(path, digest, len(chunks), tag)
+        if toks is None:
+            toks = [tokenize(c["text"], stopwords) for c in chunks]
+            _write_token_cache(path, digest, toks, tag)
+        out.extend(toks)
+    try:
+        for p in cdir.iterdir():
+            if p.is_file() and p.name not in live and p.suffix == ".json":
+                p.unlink()
+    except Exception:
+        pass
+    return out
 
 
 # --------------------------------------------------------- query encoders --
@@ -272,10 +519,12 @@ class HybridIndex:
     fused(c) = Σ_retrievers 1 / (RRF_K + rank_of_c). Robust to the two
     retrievers' incomparable score scales."""
 
-    def __init__(self, sources):
+    def __init__(self, sources, bm25=None):
         self.chunks = [c for _, chunks, _ in sources for c in chunks]
-        self.bm25 = BM25Index(self.chunks)
         self.dense = DenseIndex(sources)
+        # `bm25`: a prebuilt BM25Index over the same chunks (load_index
+        # passes one built from the token cache)
+        self.bm25 = bm25 if bm25 is not None else BM25Index(self.chunks)
 
     def search(self, query, k=None):
         k = _cfg(self, "TOP_K") if k is None else k
@@ -312,12 +561,13 @@ class SummaryIndex:
     BM25 over summary+keywords+title, RRF-fused with dense summary vectors
     when they exist and an encoder is available."""
 
-    def __init__(self, summaries):
+    def __init__(self, summaries, stopwords=None):
         self.entries = [e for _, es, _ in summaries for e in es]
         self._texts = [f"{e['essay']}. {e['summary']} {e['keywords']}"
                        for e in self.entries]
         self.bm25 = BM25Index([{"text": t, **e} for t, e in
-                               zip(self._texts, self.entries)])
+                               zip(self._texts, self.entries)],
+                              stopwords=stopwords)
         self.vecs = self.model = None
         try:
             import numpy as np
@@ -386,20 +636,34 @@ def load_index(col):
     chunks = [c for _, cs, _ in sources for c in cs]
     mode = col.setting("RETRIEVAL", config.RETRIEVAL)
     have_vectors = any(v for _, _, v in sources)
+    _bm = []
+
+    sw = collection_stopwords(col)
+
+    def bm25():                       # built once, from the token cache
+        if not _bm:
+            _bm.append(BM25Index(chunks, cached_text_tokens(col, sources, sw),
+                                 stopwords=sw))
+        return _bm[0]
+
     if mode == "bm25" or (mode == "auto" and not have_vectors):
-        base = BM25Index(chunks)
+        base = bm25()
     else:
-        cls = {"dense": DenseIndex}.get(mode, HybridIndex)  # auto/hybrid → hybrid
         try:
-            base = cls(sources)
+            if mode == "dense":
+                cls = DenseIndex
+                base = DenseIndex(sources)
+            else:                                   # auto/hybrid → hybrid
+                cls = HybridIndex
+                base = HybridIndex(sources, bm25=bm25())
         except ImportError:
             print("[rag] vectors found but no query encoder available "
                   "— using BM25. (bash setup.sh, or bundle the ONNX encoder)")
-            base = BM25Index(chunks)
+            base = bm25()
         except Exception as e:
             print(f"[rag] {cls.__name__} unavailable ({e}) — using BM25. "
                   f"Re-run: .venv/bin/python ingest.py -c {col.id} --force")
-            base = BM25Index(chunks)
+            base = bm25()
 
     hier = col.setting("HIERARCHICAL", config.HIERARCHICAL)
     if hier in ("auto", "on"):
@@ -407,7 +671,8 @@ def load_index(col):
         if summaries:
             try:
                 return _attach_col(
-                    HierarchicalIndex(base, SummaryIndex(summaries)), col)
+                    HierarchicalIndex(base, SummaryIndex(summaries,
+                                                         stopwords=sw)), col)
             except Exception as e:
                 print(f"[rag] hierarchical retrieval unavailable ({e}) — flat")
         elif hier == "on":
@@ -468,16 +733,29 @@ def _gate_min_score(n_docs, min_score=None):
     return min_score * min(1.0, math.log1p(n_docs) / math.log1p(5000))
 
 
-def bm25_gate_ok(bm, question, with_hits=False, settings=None):
+def bm25_gate_ok(bm, question, with_hits=False, settings=None, hits=None):
     """BM25 signal: top score >= the log-scaled MIN_SCORE and a top-k hit
     covering >= MIN_COVERAGE of the query terms. `settings` (a Collection
-    or an index carrying `.col`) supplies the thresholds; default: `bm`."""
+    or an index carrying `.col`) supplies the thresholds; default: `bm`.
+
+    `hits` (P2-5): the caller's own `bm.search(question, k)` result with
+    k >= TOP_K (or k=None for the full ranking) — used instead of searching
+    again; its first TOP_K entries are exactly what the search here would
+    return. Without it, bm is searched as before."""
     src = bm if settings is None else settings
-    hits = bm.search(question, _cfg(src, "TOP_K"))
-    qtoks = set(tokenize(question))
-    cov = max((sum(1 for t in qtoks
-                   if t in set(tokenize(c.get("essay", "") + " " + c["text"])))
-               / len(qtoks) for _, c in hits), default=0) if qtoks else 0
+    top_k = _cfg(src, "TOP_K")
+    hits = bm.search(question, top_k) if hits is None else list(hits)[:top_k]
+    tok = getattr(bm, "tokenize", tokenize)     # the index's stopwords
+    qtoks = set(tok(question))
+    tok_of = getattr(bm, "doc_tokens_of", None)
+
+    def doc_toks(c):
+        d = tok_of(c) if tok_of else None
+        return set(tok(c.get("essay", "") + " " + c["text"])) \
+            if d is None else set(d)
+    cov = max((sum(1 for t in qtoks if t in dt) / len(qtoks)
+               for dt in (doc_toks(c) for _, c in hits)),
+              default=0) if qtoks else 0
     ok = bool(hits and hits[0][0] >= _gate_min_score(
                   len(bm.chunks), _cfg(src, "MIN_SCORE"))
               and cov >= _cfg(src, "MIN_COVERAGE"))
@@ -490,8 +768,12 @@ def dense_top_sim(dn, question):
     return hits[0][0] if hits else 0.0
 
 
-def gate_ok(index, question):
+def gate_ok(index, question, bm25_hits=None):
     """Is the question answerable from the corpus?
+
+    `bm25_hits` (optional): the caller's `index.bm25.search(question, k)`
+    result, k >= TOP_K — reused instead of a second BM25 search. (Repeat
+    searches of one question are also memoized inside BM25Index.)
 
     BM25-only index: the BM25 signal alone (unchanged behaviour).
     With a dense signal (cosine of the top chunk), bge puts unrelated text
@@ -504,15 +786,20 @@ def gate_ok(index, question):
     dn = index if isinstance(index, DenseIndex) else getattr(index, "dense", None)
     bm = index if isinstance(index, BM25Index) else getattr(index, "bm25", None)
     if dn is None:
-        return bool(bm) and bm25_gate_ok(bm, question, settings=index)
+        return bool(bm) and bm25_gate_ok(bm, question, settings=index,
+                                         hits=bm25_hits)
     if bm is None:                  # dense-only retrieval: still gate on both
+        bm25_hits = None            # caller's hits can't be from this index
         bm = getattr(dn, "_gate_bm25", None)
-        if bm is None:
-            bm = dn._gate_bm25 = BM25Index(dn.chunks)
+        if bm is None:              # with the collection's stopwords (P2-6)
+            col = getattr(index, "col", None) or getattr(dn, "col", None)
+            bm = dn._gate_bm25 = BM25Index(
+                dn.chunks, stopwords=collection_stopwords(col))
     cos = dense_top_sim(dn, question)
     if cos >= _cfg(index, "DENSE_SOLO_SIM"):
         return True
-    ok, hits = bm25_gate_ok(bm, question, with_hits=True, settings=index)
+    ok, hits = bm25_gate_ok(bm, question, with_hits=True, settings=index,
+                            hits=bm25_hits)
     if not ok:
         return False
     if cos >= _cfg(index, "MIN_DENSE_SIM"):
@@ -1052,9 +1339,26 @@ def apply_era(hits, era, k):
 # ----------------------------------------------------------- source reader --
 
 def _chunk_start(c):
-    """Word offset encoded as the last id segment (see ingest.py).
-    Deduped ids carry a '#n' suffix (see dedup_ids) — strip it."""
+    """Word offset of a chunk in its section: the explicit "start" (P2-4),
+    else the last id segment (see ingest.py). Deduped ids carry a '#n'
+    suffix (see dedup_ids) — strip it."""
+    if isinstance(c.get("start"), int):
+        return c["start"]
     return int(c["id"].rsplit("-", 1)[-1].split("#")[0])
+
+
+def _overlap(prev, ch, step, ov):
+    """Words at the head of `ch` that repeat the tail of `prev` (the chunk
+    before it in its section), or None when there is a gap between them.
+    Chunks with explicit offsets (P2-4: "start"/"end") use them; older
+    chunks fall back to the fixed-window arithmetic (start diff == step →
+    exactly `ov` words)."""
+    ps, pe, cs = prev.get("start"), prev.get("end"), ch.get("start")
+    if all(isinstance(x, int) for x in (ps, pe, cs)):
+        if cs < ps or cs > pe:
+            return None
+        return min(pe - cs, len(ch["text"].split()))
+    return ov if _chunk_start(ch) - _chunk_start(prev) == step else None
 
 
 def build_reader(chunks):
@@ -1106,7 +1410,8 @@ def _render_words(words, paras):
 
 def passage(col, by_id, groups, chunk_id, before=1, after=1):
     """Continuous text around a cited chunk, with the chunk's exact overlap
-    (CHUNK_OVERLAP_WORDS) removed at every stitch so nothing repeats.
+    removed at every stitch so nothing repeats (_overlap: the explicit
+    start/end offsets, or CHUNK_OVERLAP_WORDS for pre-P2-4 chunks).
     Paragraph breaks (\\n\\n) are restored from the display-only para maps."""
     c = by_id[chunk_id]
     seq = groups[(c["source"], c["essay"])]
@@ -1127,8 +1432,9 @@ def passage(col, by_id, groups, chunk_id, before=1, after=1):
             w = ch["text"].split()
             skip = 0
             if prev is not None:
-                if _chunk_start(ch) - _chunk_start(prev) == step:
-                    skip = ov
+                o = _overlap(prev, ch, step, ov)
+                if o is not None:
+                    skip = o
                 else:
                     paras.add(len(words))
                     words.append("[…]")
@@ -1144,12 +1450,13 @@ def passage(col, by_id, groups, chunk_id, before=1, after=1):
             paras = {p for p in paras if p < len(words)}
         return _render_words(words, paras)
 
-    drop = 0
+    drop, gap = 0, False
     if prevs:
-        if _chunk_start(c) - _chunk_start(prevs[-1]) == step:
-            drop = ov      # before-block tail duplicates the cited chunk head
+        o = _overlap(prevs[-1], c, step, ov)
+        gap = o is None
+        drop = o or 0      # before-block tail duplicates the cited chunk head
     before_text = assemble(prevs, drop_tail=drop)
-    if prevs and not drop:
+    if gap:
         before_text += " […]"
     cited_words = c["text"].split()
     after_text = assemble(nexts, anchor_prev=c)
@@ -1282,15 +1589,70 @@ def verify_quotes(answer, chunks, ratio=None):
     return results
 
 
+# ------------------------------------- search only / closest material --
+# P2-9: both show retrieved passages WITHOUT a model call. Neither changes
+# what the gate accepts: closest_material() runs only after gate_ok() has
+# said no, and search_passages() reports the gate verdict as "covered"
+# without acting on it.
+
+SNIPPET_WORDS = 40
+CLOSEST_K = 3
+
+
+def passage_info(c, score, snippet_words=SNIPPET_WORDS):
+    """The JSON shape the UI lists: a source entry plus a text snippet."""
+    words = c["text"].split()
+    snippet = " ".join(words[:snippet_words])
+    if len(words) > snippet_words:
+        snippet += " …"
+    return {"id": c["id"], "essay": c["essay"], "year": chunk_year(c),
+            "page_start": c["page_start"], "page_end": c["page_end"],
+            "source": c["source"],
+            "work": c.get("work", Path(c["source"]).stem),
+            "score": round(float(score), 4), "snippet": snippet}
+
+
+def closest_material(index, query, n=CLOSEST_K):
+    """For a gated-out question: the n nearest passages (one per section,
+    best-first), so the user sees what the collection does hold instead
+    of a bare refusal. [] when nothing matches at all."""
+    out, seen = [], set()
+    for s, c in index.search(query, max(n * 4, n)):
+        key = (c["source"], c["essay"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(passage_info(c, s))
+        if len(out) >= n:
+            break
+    return out
+
+
+def search_passages(col, question, index=None, k=None):
+    """Search-only mode: ranked passages for `question`, no LLM call.
+    Same retrieval path as ask_stream (pool, rerank, per-source cap), no
+    follow-up rewrite (that needs the model). "covered" is the gate's
+    verdict, reported for the UI and never used to filter."""
+    index = index or load_index(col)
+    k = _cfg(col, "TOP_K") if k is None else int(k)
+    k = max(1, min(k, 50))
+    pool = index.search(question, k * _cfg(col, "POOL_FACTOR"))
+    hits = diversify(_maybe_rerank(question, pool, _cfg(col, "RERANK")), k,
+                     cap=_cfg(col, "MAX_PER_WORK"))
+    return {"question": question, "covered": bool(gate_ok(index, question)),
+            "results": [passage_info(c, s) for s, c in hits]}
+
+
 # -------------------------------------------------------------------- ask --
 
 def ask_stream(col, question, mode="scholar", index=None, k=None,
                history=None):
     """Returns {"sources", "mode", "stream", "answer", "dropped",
-    "rewritten_question", "history_used"}.
+    "rewritten_question", "history_used"}, plus "closest" when gated out.
 
     stream is a generator of text deltas, or None when the question is
-    gated out (then "answer" holds the fallback text). "sources" lists only
+    gated out (then "answer" holds the fallback text and "closest" the
+    nearest passages, closest_material()). "sources" lists only
     the excerpts actually sent, in prompt order: excerpt [n] in the prompt
     is sources[n-1]. "dropped" counts hits removed to fit the model window
     (config.LLM_CTX - config.LLM_MAX_TOKENS).
@@ -1312,7 +1674,8 @@ def ask_stream(col, question, mode="scholar", index=None, k=None,
     if not gate_ok(index, query):
         return {"answer": not_covered(col), "sources": [], "mode": mode,
                 "stream": None, "dropped": 0,
-                "rewritten_question": rewritten, "history_used": 0}
+                "rewritten_question": rewritten, "history_used": 0,
+                "closest": closest_material(index, query)}
     system_fn, temp_key, k_key = MODES.get(mode, MODES["scholar"])
     system = system_fn(col)
     temperature = _cfg(col, temp_key or "TEMPERATURE")
@@ -1384,6 +1747,9 @@ class Runtime:
     def ask_stream(self, question, mode="scholar", k=None, history=None):
         return ask_stream(self.col, question, mode=mode, index=self.index, k=k,
                           history=history)
+
+    def search(self, question, k=None):
+        return search_passages(self.col, question, index=self.index, k=k)
 
     def passage(self, chunk_id, before=1, after=1):
         return passage(self.col, self.by_id, self.groups, chunk_id,

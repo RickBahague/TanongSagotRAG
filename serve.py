@@ -17,7 +17,11 @@ All corpus routes are collection-scoped under /c/<id>/…:
   GET    /c/<id>/stats              capabilities + per-source table
   POST   /c/<id>/ask                NDJSON stream: meta, delta…, then
                                      verify (quotes) or citations
-                                     (scholar/persona), done
+                                     (scholar/persona), done. A gated-out
+                                     question's meta has "closest": the
+                                     nearest passages (no model call)
+  POST   /c/<id>/search             search only, no LLM: {question, k?} →
+                                     {question, covered, results[]}
   POST   /c/<id>/ingest             start (or attach to) the collection's
                                      background ingest job; NDJSON view of
                                      its events (?force=1 ?summaries=0
@@ -958,6 +962,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, "unknown collection")
         if path == "/ask":
             self._do_ask(cid, req)
+        elif path == "/search":
+            self._do_search(cid, req)
         elif path == "/ingest":
             self._do_ingest(col, qs)
         elif path == "/ingest/cancel":
@@ -1056,6 +1062,23 @@ class Handler(BaseHTTPRequestHandler):
         for ev in job.follow(start if attached else 0):
             self._w(ev)
 
+    def _do_search(self, cid, req):
+        """Search-only mode (P2-9): ranked passages, no model call, nothing
+        saved to the conversation."""
+        q = req.get("question") if isinstance(req, dict) else None
+        if not isinstance(q, str) or not q.strip():
+            raise RequestError(400, "question must be a non-empty string")
+        k = req.get("k")
+        if k is not None and (isinstance(k, bool) or not isinstance(k, int)
+                              or not 1 <= k <= 50):
+            raise RequestError(400, "k must be an integer from 1 to 50")
+        try:
+            rt = runtime(cid)
+        except NOT_INDEXED:
+            return self._json({"type": "error",
+                               "error": not_indexed_msg(cid)}, 409)
+        self._json(rt.search(q.strip(), k=k))
+
     def _do_ask(self, cid, req):
         # resolve the runtime BEFORE the stream starts, so "not indexed" is
         # a real 409 (body is also a valid one-line NDJSON error event)
@@ -1081,7 +1104,8 @@ class Handler(BaseHTTPRequestHandler):
             w({"type": "meta", "mode": res["mode"], "sources": res["sources"],
                "conversation_id": conv, "dropped": res.get("dropped", 0),
                "rewritten_question": res.get("rewritten_question"),
-               "history_used": res.get("history_used", 0)})
+               "history_used": res.get("history_used", 0),
+               "closest": res.get("closest") or []})
             verify = citations = None
             if res["stream"] is None:
                 answer = res["answer"]

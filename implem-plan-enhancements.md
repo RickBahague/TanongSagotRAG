@@ -373,10 +373,8 @@ window.
 
 ## M5 — Retrieval items, one goal each
 
-Each of these changes scoring or chunking, so each is its own goal with one
-agent, and each is kept only if eval improves. Run them after you have a
-real multi-document collection with an `eval.jsonl`; pass its id as
-`EVAL_COLLECTION` so `verify.sh` measures there as well as on the fixtures.
+Each of these changes scoring or chunking, so each is its own goal, and each
+is kept only if it meets its "keep if" rule.
 
 | Goal | Item | Owns | Keep if |
 |---|---|---|---|
@@ -387,12 +385,64 @@ real multi-document collection with an `eval.jsonl`; pass its id as
 | M5-5 | P2-6 Unicode tokenizer, per-collection stopwords | `rag.py` | English numbers unchanged; non-ASCII fixture passes |
 | M5-6 | P2-7 ONNX reranker | `rag.py`, `encoder.py`, `scripts/` | MRR up on the real collection (needs a model download: ask first) |
 
-**Goal text template**
-> Complete M5-<n> of implem-plan-enhancements.md with one subagent. Done
-> when `bash scripts/verify.sh M5-<n>` prints `VERIFY M5-<n>: PASS` and
-> plan.md records before/after eval numbers for the change. If the numbers
-> do not meet the "keep if" rule, revert the change, record that in
-> plan.md, and stop. Do not commit.
+**How an M5 goal is run** (method, not part of the goal condition)
+- Use one subagent per item. If that agent is stopped or fails, resume it,
+  or let the orchestrator finish the item and say so in `plan.md`. Who did
+  the work is not a completion check.
+- Before editing, snapshot the files the item owns outside the repo. A
+  revert restores that snapshot; never `git checkout`, which would also
+  wipe earlier uncommitted items.
+- Measure before and after on the fixtures (`tests/eval_fixture.py`) and on
+  IBON in a scratch home. If `EVAL_COLLECTION` names a real collection,
+  measure there too with `eval.py --json`. `verify.sh` does not read
+  `EVAL_COLLECTION`; it checks the suite, the fixture eval, that `plan.md`
+  has an `M5-<n>` entry, and that `devdata/` and `writings/` are unchanged.
+- The orchestrator appends a `## M5-<n> eval` section to `plan.md` with the
+  before/after numbers and the verdict: kept, or reverted and why.
+
+**Goal texts** (paste one; each names its item, and its condition is only
+what `verify.sh` and `plan.md` can show)
+
+> Complete M5-1 of implem-plan-enhancements.md. Done when
+> `bash scripts/verify.sh M5-1` prints `VERIFY M5-1: PASS` and plan.md has
+> an "M5-1 eval" section with before/after numbers and a verdict (kept, or
+> reverted because the keep-if rule was not met). Do not commit.
+
+Replace `M5-1` with `M5-2` … `M5-5` for the other items. Do not paste the
+text with a placeholder such as `M5-<n>`: the goal checker cannot tell which
+item was meant and will never mark it complete.
+
+> Complete M5-6 of implem-plan-enhancements.md. Done when
+> `bash scripts/verify.sh M5-6` prints `VERIFY M5-6: PASS` and plan.md has
+> an "M5-6 eval" section with before/after MRR on collection <id> and a
+> verdict. You may download the reranker model named in that section. Do
+> not commit.
+
+M5-6 needs two things from you first: approval of the model download (put
+it in the goal text, as above) and a real multi-document collection with an
+`eval.jsonl`, whose id replaces `<id>`.
+
+**Why the old template failed as a goal** (2026-11-12)
+- It was pasted with `M5-<n>` unfilled, so no item was ever named.
+- "with one subagent" was part of the condition. It describes how the work
+  is done, cannot be checked from any output, and can never be satisfied
+  again once an agent is stopped partway.
+- "revert … and stop" made a reverted item look unfinished. A recorded
+  revert is now a valid way to complete the goal.
+- It told you to run M5 only with a real collection and `EVAL_COLLECTION`,
+  but `verify.sh` never used that variable.
+
+**As run (2026-11-12, uncommitted at the time of writing)** — fixtures and
+IBON only; re-measure on a real collection. Numbers are in `plan.md`.
+
+| Goal | Result |
+|---|---|
+| M5-1 | kept: identical rankings, search about 110× faster at 50k chunks, load time about the same |
+| M5-2 | idf-weighted gate reverted (false rejects went up); closest material and search-only kept |
+| M5-3 | kept: sources on rung `none` 10 → 8, hit@k unchanged |
+| M5-4 | kept: round trip exact, hit@k unchanged |
+| M5-5 | kept: English results identical, non-ASCII test passes; off-topic Greek still passes the hybrid gate (strict xfail) |
+| M5-6 | not run: needs the model download and a real collection |
 
 ---
 

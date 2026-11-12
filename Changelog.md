@@ -2,6 +2,71 @@
 
 ## 2026-11-12
 
+### Bug fix — M5 goal text in the implementation plan could not complete
+The M5 section of `implem-plan-enhancements.md` gave a goal template that the
+`/goal` checker could never mark done: it was pasted with `M5-<n>` unfilled,
+it made "with one subagent" part of the completion condition (not checkable,
+and unsatisfiable once an agent is stopped), and it treated a revert as
+"stop" instead of a valid outcome. Rewrote the section: concrete goal texts
+per item whose condition is only the `verify.sh` line and a `plan.md`
+section with a verdict; the subagent and snapshot-revert method moved to
+notes; removed the claim that `verify.sh` reads `EVAL_COLLECTION`; M5-6's
+two prerequisites stated; added an as-run results table for M5-1…M5-6.
+
+### Feature — M5-2…M5-6: search-only mode, segmentation, chunking, Unicode tokenizer
+Remaining M5 goals of `implem-plan-enhancements.md`, run by one subagent,
+each item kept only under its "keep if" rule. `bash scripts/verify.sh M5-<n>`
+passes for every item; numbers are in `plan.md` ("M5-2 eval" … "M5-6 eval"),
+all measured on the fixtures and IBON only (no real multi-document
+collection yet).
+- **M5-2 (P2-9)** (`rag.py`, `serve.py`, `static/index.html`): kept
+  "closest material" (a gated-out question shows the 3 nearest passages)
+  and search-only mode (`POST /c/<id>/search` plus a Search button, no model
+  call). **Reverted** the idf-weighted gate coverage: false accepts went
+  down (1 → 0 hybrid) but false rejects went up (0 → 2 hybrid, 2 → 9
+  BM25-only) on 180 labelled pairs. Gate decisions are unchanged.
+- **M5-3 (P2-3)** (`ingest.py`): heading detection for PDF (font size and
+  bold), HTML, TXT and DOCX; sources left on segmentation rung `none` fell
+  10 → 8; hit@k unchanged; IBON 14 → 15 chunks. Sources re-chunk once
+  (`SEGMENTER_VERSION`).
+- **M5-4 (P2-4)** (`ingest.py`, `rag.py`): chunk ends move back to a
+  paragraph or sentence break, at most 10% of `CHUNK_WORDS`; chunks store
+  `start`/`end` offsets; `passage()` round trip still exact; hit@k unchanged.
+- **M5-5 (P2-6)** (`rag.py`): NFKC, casefolding and Unicode word
+  characters in the tokenizer, plus an optional per-collection
+  `stopwords.txt`; English results identical; token caches rebuild once.
+  Known limit pinned as a strict xfail: the English encoder lets off-topic
+  Greek questions through the hybrid gate.
+- **M5-6 (P2-7)**: not run. The ONNX reranker needs a model download, which
+  needs your approval, and its keep-if rule needs a real collection.
+- **M5-1 re-check** by the same subagent on the final code (`rag.py`):
+  per-collection stopwords now also apply to the BM25 index built for
+  dense-only gating; an ASCII fast path in the tokenizer brings the uncached
+  50k-chunk build back to 3.15 s (it was 4.89 s after M5-5), with the same
+  tokens. Rankings still identical; search about 110× faster.
+- Tests: `tests/test_m5_2_search.py`, `test_m5_3_segmentation.py`,
+  `test_m5_4_chunking.py`, `test_m5_5_tokenizer.py`, plus 3 more in
+  `test_m5_1_bm25.py` (291 passed, 1 xfailed).
+
+### Feature — M5-1: BM25 that scales (inverted index, gate reuse, token cache)
+Goal M5-1 of `implem-plan-enhancements.md` (P2-5). Kept under the plan's
+rule: rankings identical on the fixtures, faster on a synthetic 50k-chunk
+corpus. Numbers are in `plan.md` ("M5-1 eval"); `bash scripts/verify.sh M5-1`
+passes.
+- `rag.py`: `BM25Index` scores through an inverted index (term → postings)
+  with the old float expression and tie order, so scores and rankings are
+  unchanged. Per-query memo; `gate_ok`/`bm25_gate_ok` can reuse the caller's
+  hits. Search at 50k chunks: 28 ms → 0.3 ms median.
+- Token cache `data/cache/tokens/<artifact key>.json` keyed by chunk-text
+  hash plus tokenizer version/stopwords; rebuilt silently when stale or
+  corrupt; files for removed sources dropped on load. Warm index load
+  slightly faster at 50k chunks (2.6–3.0 s → 2.2–2.5 s); the first load after a change is slower
+  (it writes the cache).
+- Independent review: `search_idx` with k ≤ 0 now matches the old slice;
+  warm-load gain is small and varies between runs (see `plan.md`).
+- Tests: `tests/test_m5_1_bm25.py` (16, compares against a verbatim copy
+  of the old scorer); 236 passed.
+
 ### Feature — M4: settings, source management, background ingest, chat UX
 Milestone M4 of `implem-plan-enhancements.md` (P3-1…P3-5), run as a backend
 subagent then a UI subagent. `bash scripts/verify.sh M4` passes; fixture
