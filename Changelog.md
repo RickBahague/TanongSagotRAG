@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-11-19
+
+### Bug fix — Follow-up answers copied earlier answers; JMS set up as the eval collection
+Reported from the JMS collection: "does election bring real social
+change?" came back as the previous answer word for word, and other
+follow-ups reused earlier answers. Earlier Q&A went into every prompt in a
+conversation, and the 1.5B model copied it.
+- `rag.py`: earlier turns go into the prompt only for follow-ups (questions
+  that got a standalone rewrite), and only as earlier questions, never
+  earlier answers. Replaying the user's JMS conversations: copied answers
+  2 → 0, citations 6/9 → 7/9.
+- `rag.py`: the citation reminder's example is now a placeholder
+  (`"<a fact from excerpt 2> [2]"`). The 2026-11-13 example sentence ("The
+  bridge opened in 1932 [2].") was being given as the answer to poorly
+  covered questions. Fixtures still 14/15 cited on both local models.
+- Tests updated in `tests/test_m3a_answer_quality.py` for the new history
+  rule (296 passed).
+- JMS (12 books, 4,257 chunks) is now the real evaluation collection: a
+  35-question `eval.jsonl` added to it, and first numbers in `plan.md`
+  ("JMS eval": hybrid MRR 0.858, gate 1 false accept / 1 false reject;
+  thresholds not changed yet). `implem-plan-enhancements.md` names it for
+  M5 re-runs. Details in `plan.md` ("Follow-up history").
+
 ## 2026-11-13
 
 ### Bug fix — Desktop app: "Shared library with base name 'llama' not found"

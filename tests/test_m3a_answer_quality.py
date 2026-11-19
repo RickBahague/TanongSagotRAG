@@ -228,19 +228,23 @@ def test_followup_rewritten(server, fake_llm, make_collection):
     assert meta["history_used"] == 1
     assert meta["sources"][0]["source"] == "glaciers.docx"  # retrieved on it
     ans = fake_llm.last["messages"][1]["content"]
-    assert ans.startswith("Earlier in this conversation:\nQ: " + BEES_Q)
+    assert ans.startswith("Earlier questions in this conversation (context only; answer the new question below):\n- " + BEES_Q)
+    # earlier ANSWERS never go into the prompt (a small model copied them)
+    assert "A: " not in ans
     assert f"Question: {follow}\n(Standalone form: {ICE_Q})" in ans
     turns = conversations.load(col, conv)
     assert turns[1]["rewritten_question"] == ICE_Q
     assert turns[1]["citations"]["used"] == [1]
 
-    # a standalone question in the same conversation: history, no rewrite
+    # a standalone question in the same conversation: no rewrite, and no
+    # history in its prompt (with it, a small model re-answered the old one)
     q3 = "Why did Newton build a reflecting telescope?"
     evs = _ask(server, col, q3, conversation_id=conv)
     assert len(fake_llm.requests) == 4
     assert len(_rewrite_requests(fake_llm)) == 1
     assert evs[0]["rewritten_question"] is None
-    assert evs[0]["history_used"] == 2
+    assert evs[0]["history_used"] == 0
+    assert "Earlier questions" not in fake_llm.last["messages"][1]["content"]
 
 
 def test_followup_uses_last_three_turns(server, fake_llm, make_collection):
@@ -307,7 +311,7 @@ def test_history_trimmed_before_excerpts(monkeypatch):
     monkeypatch.setattr(config, "LLM_CTX", _need(system, bare) + 100 + 5)
     sent, user, dropped, used = rag.fit_prompt(system, "q?", hits, history)
     assert dropped == 0 and len(sent) == 4 and used == 0
-    assert "Earlier in this conversation" not in user
+    assert "Earlier questions" not in user
 
     # room for exactly the most recent turn: oldest turns go first
     monkeypatch.setattr(config, "LLM_CTX", 100000)
@@ -318,32 +322,42 @@ def test_history_trimmed_before_excerpts(monkeypatch):
     assert dropped == 0 and used == 1
     assert "ttt2" in user and "ttt1" not in user and "ttt0" not in user
 
-    # plenty of room: all three turns, oldest first, answers clipped
+    # plenty of room: all three turns' questions, oldest first; their
+    # answers are never included
     monkeypatch.setattr(config, "LLM_CTX", 100000)
     sent, user, dropped, used = rag.fit_prompt(system, "q?", hits, history,
                                                answer_words=20)
     assert used == 3 and dropped == 0
     assert user.index("ttt0") < user.index("ttt1") < user.index("ttt2")
-    assert "a0y19 …" in user and "a0y20" not in user
+    assert "a0y" not in user
 
     # too small even without history: excerpts drop as before (M1)
     monkeypatch.setattr(config, "LLM_CTX", _need(system, bare) + 100 - 40)
     sent, user, dropped, used = rag.fit_prompt(system, "q?", hits, history)
     assert used == 0 and dropped >= 1
-    assert "Earlier in this conversation" not in user
+    assert "Earlier questions" not in user
 
 
-def test_ask_stream_history_inside_budget(make_collection, fake_llm,
-                                          monkeypatch):
+def test_ask_stream_history_only_for_followups(make_collection, fake_llm,
+                                               monkeypatch):
+    # JMS bug (2026-11-19): with the previous Q&A in every prompt, the 1.5B
+    # model answered "does election bring real social change?" with the
+    # previous answer word for word. History now goes in only for follow-ups,
+    # and only as earlier questions.
     col = make_collection()
     fake_llm.reply = lambda body: (ICE_Q if _is_rewrite(body) else "ok [1]")
     hist = [{"question": BEES_Q, "answer": "zqlong " * 400}]
     monkeypatch.setattr(config, "LLM_CTX", 100000)
-    res = rag.ask_stream(col, ICE_Q, history=hist)
+    res = rag.ask_stream(col, ICE_Q, history=hist)          # standalone
     "".join(res["stream"])
-    assert res["history_used"] == 1 and res["rewritten_question"] is None
-    # the past answer is clipped to HISTORY_ANSWER_WORDS
-    assert fake_llm.prompt_text().count("zqlong") == config.HISTORY_ANSWER_WORDS
+    assert res["history_used"] == 0 and res["rewritten_question"] is None
+    assert "zqlong" not in fake_llm.prompt_text()
+    assert BEES_Q not in fake_llm.last["messages"][1]["content"]
+    res = rag.ask_stream(col, "And what about those?", history=hist)
+    "".join(res["stream"])
+    assert res["rewritten_question"] == ICE_Q and res["history_used"] == 1
+    user = fake_llm.last["messages"][1]["content"]
+    assert BEES_Q in user and "zqlong" not in user
 
 
 # ------------------------------------------------------------ ask.py -----
@@ -365,7 +379,7 @@ def test_cli_chat_followup_and_citation_warning(make_collection, fake_llm,
     assert out.count("Citation check: [42]") == 2
     assert "[1] " in out and "(not cited)" in out
     last = _answer_requests(fake_llm)[-1]["messages"][1]["content"]
-    assert last.startswith("Earlier in this conversation:\nQ: " + BEES_Q)
+    assert last.startswith("Earlier questions in this conversation (context only; answer the new question below):\n- " + BEES_Q)
 
 
 def test_numbered_prompt_ends_with_cite_reminder(make_collection):

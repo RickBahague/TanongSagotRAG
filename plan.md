@@ -560,3 +560,78 @@ questions, scholar mode, collection of the 5 clean fixture files:
 Retrieval is unaffected: fixture eval unchanged (hit@10 1.0, MRR 0.967).
 Not yet measured on larger models or a real collection; no fallback for
 bare-marker answers was added, since none appeared after the change.
+
+## JMS eval — 2026-11-19 (first real multi-document collection)
+
+`jms` is the real collection the gate thresholds (M2) and the M5 items were
+waiting for: 12 books (Jose Ma. Sison's writings), 4,257 chunks, linked from
+`/Volumes/APFS/ClaudeAutomate/AskJ/writings`. Its eval set is
+`collections/jms/data/eval.jsonl`: 25 on-topic questions, each with a regex
+for the section or text that answers it, plus 10 off-topic questions. Two
+patterns ("state of the Philippines", "basic problems") match 190–340
+chunks because the corpus repeats those phrases; the rest match 4–175.
+Measured on a scratch copy (`eval.py -c jms --json --variants`), current
+thresholds:
+
+| Variant | hit@1 | hit@3 | hit@10 | recall@10 | MRR | Gate FA / FR |
+|---|---|---|---|---|---|---|
+| BM25 only | 0.80 | 0.80 | 0.92 | 0.28 | 0.819 | 5 / 1 |
+| **Hybrid (default)** | 0.80 | 0.92 | 0.96 | 0.24 | **0.858** | **1 / 1** |
+| Hierarchical, +rerank | unavailable (no summaries; no reranker) | | | | | |
+
+Gate signals (top-1 cosine): on-topic 0.696–0.884, off-topic 0.458–0.598,
+so on JMS the dense score alone separates them with a wide margin.
+- False reject: "What is the state of the Philippines?" Its words are
+  everywhere in the corpus, so the BM25 top score is 3.18 against the
+  scaled bar of 4.91, and its cosine is 0.716, just under `DENSE_SOLO_SIM`
+  0.72 (the curly-apostrophe "what’s …" form scores 0.726 and passes).
+- False accept: "How does photosynthesis work in plants?" BM25 passes and
+  cosine is 0.598 ≥ `MIN_DENSE_SIM` 0.57.
+- BM25-only gating is weak at this size: 5 of 10 off-topic questions pass.
+
+Thresholds are **not** changed yet: lowering `DENSE_SOLO_SIM` to about 0.70
+and raising `MIN_DENSE_SIM` to about 0.60 would fix both errors here, but
+the second has a 0.002 margin, and the M2 labelled sets they must also be
+checked against were lost with the scratch folder. Re-measure with a larger
+JMS eval set before changing them. Run future M5 items with
+`EVAL_COLLECTION=jms`.
+
+## Follow-up history — 2026-11-19 (answers copied from earlier turns, JMS)
+
+Bug from the JMS collection: with the previous Q&A in the prompt (M3,
+P2-1), the bundled 1.5B model answered a new question with an earlier
+answer word for word. "Does election bring real social change?" got the
+previous "role of youth" answer (99–100 % 8-word-shingle overlap); a
+follow-up copied an earlier "not covered" refusal the same way. History
+was included on every turn of a conversation, not only on follow-ups.
+
+Measured by replaying the user's 2 saved JMS conversations (10 questions)
+with the embedded model (copied = ≥ 50 % of the answer's 8-word shingles
+appear in an earlier answer):
+
+| Variant | Copied answers | Cited |
+|---|---|---|
+| before (Q+A history on every turn) | 2 | 6 / 9 |
+| V1: history only for follow-ups | 1 (copied a refusal) | 7 / 9 |
+| **V2: follow-ups only, earlier questions only** | **0** | 7 / 9 |
+
+V2 is kept: earlier answers never go into the prompt, and earlier
+questions go in only when the question was rewritten as a follow-up.
+
+The same replay exposed a second bug, from the "Citation prompt" fix
+(2026-11-13): asked a question the excerpts barely covered, the model
+answered with the reminder's example sentence ("The bridge opened in
+1932 [2]."). Reminder wording, same replay:
+
+| Reminder example | Cited | Example copied |
+|---|---|---|
+| "The bridge opened in 1932 [2]." | 7 / 9 | 2 |
+| none ("a sentence taken from excerpt 2 ends with [2]") | 2 / 9 | 0 |
+| **`"<a fact from excerpt 2> [2]"`** | **7 / 9** | **0** |
+| `Format: "Your sentence here [2]."` | 5 / 9 | 1 |
+
+With the kept wording, the 15 fixture questions give 14/15 cited on both
+Ollama `qwen2.5:1.5b` and the embedded GGUF (was 14 and 15), with no bare
+markers, header echoes or copied examples. Still open: the two election
+answers stay off-topic. That is the retrieval miss already in the JMS eval
+("Can elections bring real social change?"), not a copy.

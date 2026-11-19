@@ -1162,11 +1162,11 @@ def _clip_words(text, n):
 
 
 def _history_text(turns, answer_words):
-    lines = []
-    for t in turns:
-        lines.append(f"Q: {_clip_words(t.get('question', ''), answer_words)}")
-        lines.append(f"A: {_clip_words(t.get('answer', ''), answer_words)}")
-    return "\n".join(lines)
+    """Earlier questions for the prompt. Earlier ANSWERS are left out: a
+    1.5B model copied them word for word into the new answer (and copied a
+    "not covered" refusal the same way) — plan.md, "Follow-up history"."""
+    return "\n".join(f"- {_clip_words(t.get('question', ''), answer_words)}"
+                     for t in turns if t.get("question"))
 
 
 REWRITE_SYSTEM = ("You rewrite a follow-up question into one standalone "
@@ -1228,10 +1228,14 @@ def _words(text):
 # ignored the system prompt's citation rule, or answered with a bare "[1]";
 # a short reminder with a worked example right before the answer fixes most
 # of both (measured: see plan.md, "Citation prompt").
-CITE_REMINDER = ("Answer in your own words in a few sentences. After each "
-                 "sentence, put the number of the excerpt it is based on in "
-                 "square brackets, like this: The bridge opened in 1932 [2]. "
-                 "Never reply with only a number.")
+# The format example is a placeholder, never a real sentence: with
+# "The bridge opened in 1932 [2]." the model answered a poorly covered
+# question with exactly that sentence.
+CITE_REMINDER = ("Answer in your own words in a few sentences, using only "
+                 "the excerpts. End each sentence with the number of the "
+                 "excerpt it is based on, in square brackets, like this: "
+                 '"<a fact from excerpt 2> [2]". Never reply with only a '
+                 "number.")
 
 
 def user_prompt(context, question, history_text="", standalone=None,
@@ -1239,7 +1243,8 @@ def user_prompt(context, question, history_text="", standalone=None,
     """User message: optional recent conversation, the excerpts, and the
     question (with its standalone rewrite when there is one); numbered
     prompts end with CITE_REMINDER."""
-    head = (f"Earlier in this conversation:\n{history_text}\n\n"
+    head = (f"Earlier questions in this conversation (context only; answer "
+            f"the new question below):\n{history_text}\n\n"
             if history_text else "")
     q = f"{question}\n(Standalone form: {standalone})" if standalone \
         else question
@@ -1729,8 +1734,12 @@ def ask_stream(col, question, mode="scholar", index=None, k=None,
         system = system_persona_tuned(col)
     # Budget against the final system prompt; trims history, then drops by
     # retrieval rank, then orders chronologically for evolution questions.
+    # Earlier turns go into the prompt only for a follow-up (one that was
+    # rewritten): a standalone question needs no history, and with history
+    # present a small model answered the previous question again.
+    prompt_history = history if rewritten else []
     hits, user, dropped, used = fit_prompt(
-        system, question, hits, history, numbered=(mode != "quotes"),
+        system, question, hits, prompt_history, numbered=(mode != "quotes"),
         standalone=rewritten, order_question=query,
         answer_words=_cfg(col, "HISTORY_ANSWER_WORDS"))
     gen = llm_stream(system, user, temperature=temperature, model=model,

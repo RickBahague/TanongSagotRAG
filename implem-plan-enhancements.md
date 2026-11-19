@@ -422,6 +422,10 @@ M5-6 needs two things from you first: approval of the model download (put
 it in the goal text, as above) and a real multi-document collection with an
 `eval.jsonl`, whose id replaces `<id>`.
 
+**Real collection (2026-11-19):** `jms` (12 books, 4,257 chunks) now has a
+35-question `eval.jsonl`; use it as `<id>` and as `EVAL_COLLECTION`. Its
+first numbers are in `plan.md` ("JMS eval").
+
 **Why the old template failed as a goal** (2026-11-12)
 - It was pasted with `M5-<n>` unfilled, so no item was ever named.
 - "with one subagent" was part of the condition. It describes how the work
