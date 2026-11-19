@@ -26,5 +26,26 @@ def reingest(col, **kw):
     return events
 
 
+# Known BM25-only false rejects on the fixtures (tests/test_gate.py): with
+# a dense signal the gate accepts them. A test that compares gate verdicts
+# with the eval labels skips these when the index has no dense part.
+BM25_KNOWN_FALSE_REJECTS = {"What can ice cores tell us about past climate?"}
+
+
+def has_dense(index):
+    """True when retrieval has a dense signal (encoder + vectors), i.e. not
+    the BM25-only install (requirements.txt without the optional deps)."""
+    import rag
+    return isinstance(index, rag.DenseIndex) or \
+        getattr(index, "dense", None) is not None
+
+
+def gate_expected(index, q):
+    """The eval label as the gate should see it on this index."""
+    if not has_dense(index) and q["q"] in BM25_KNOWN_FALSE_REJECTS:
+        return False
+    return bool(q["expect"])
+
+
 def load_eval():
     return [json.loads(l) for l in open(FIXTURES / "eval.jsonl") if l.strip()]

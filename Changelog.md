@@ -2,6 +2,23 @@
 
 ## 2026-11-19
 
+### Bug fix — Vague follow-ups passed the keyword gate; tests failed on keyword-only installs
+"And what about those?" passed the keyword-only relevance gate because
+"those" was not a stopword. On an install with only `requirements.txt`
+(supported), 8 tests failed because they assumed the dense encoder.
+- `rag.py`: function words added to `STOPWORDS` (these, those, there, here,
+  then, than, into, …). "us" and "may" are left out on purpose, since they
+  are JMS search terms ("US", "May 1"). Ranking unchanged or better on JMS,
+  IBON and the test documents (JMS +rerank MRR 0.97 → 0.98); hybrid gate
+  errors unchanged.
+- Tests: `tests/helpers.py` gains `has_dense()`/`gate_expected()`;
+  `test_m1d_artifact_keys.py`, `test_m3a_answer_quality.py`,
+  `test_m4a_settings.py`, `test_m5_2_search.py` and `test_m5_5_tokenizer.py`
+  now hold with and without dense retrieval. Keyword-only: 301 passed, 22
+  skipped; full install: 322 passed.
+- `.github/workflows/ci.yml`: new `bm25-only` job. Numbers in `plan.md`
+  ("Function-word stopwords and BM25-only tests").
+
 ### Feature — First-run model download, GPU, app icon, CI with build smoke test, PDF header option
 The remaining P4 items the user picked, plus the two JMS retrieval issues.
 - First-run download (`modeldl.py`, new): the app build no longer contains

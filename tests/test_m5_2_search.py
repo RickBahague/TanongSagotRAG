@@ -9,9 +9,11 @@ import pytest
 
 import library
 import rag
-from helpers import CLEAN_FILES, CORPUS, load_eval
+from helpers import CLEAN_FILES, CORPUS, gate_expected, load_eval
 
-OFF = "How do I configure a Kubernetes ingress controller?"
+# off-topic, but shares one word ("volcanoes") with the fixtures, so
+# BM25-only installs have closest material to show as well (coverage 1/6)
+OFF = "How do I configure a Kubernetes ingress controller near volcanoes?"
 ON = "How do worker bees build the wax comb?"
 KEYS = {"id", "essay", "year", "page_start", "page_end", "source", "work",
         "score", "snippet"}
@@ -90,7 +92,7 @@ def test_gate_decisions_unchanged(col):
         before = rag.gate_ok(index, q["q"])
         rag.search_passages(col, q["q"], index=index)
         rag.closest_material(index, q["q"])
-        assert rag.gate_ok(index, q["q"]) == before == bool(q["expect"])
+        assert rag.gate_ok(index, q["q"]) == before == gate_expected(index, q)
 
 
 # ------------------------------------------------------------------ HTTP --

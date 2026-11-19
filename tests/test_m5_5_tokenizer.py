@@ -11,7 +11,7 @@ import pytest
 import library
 import ingest
 import rag
-from helpers import CLEAN_FILES, CORPUS, load_eval
+from helpers import CLEAN_FILES, CORPUS, gate_expected, load_eval
 
 FRENCH = """# Été à Marseille
 
@@ -151,7 +151,7 @@ def test_greek_off_topic_hybrid_gate(intl_col):
 def test_english_still_answered_in_mixed_collection(intl_col):
     index = rag.load_index(intl_col)
     for q in load_eval():
-        assert rag.gate_ok(index, q["q"]) == bool(q["expect"]), q["q"]
+        assert rag.gate_ok(index, q["q"]) == gate_expected(index, q), q["q"]
 
 
 # ------------------------------------------------- per-collection stopwords --

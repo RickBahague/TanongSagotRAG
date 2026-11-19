@@ -4,6 +4,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 import config
 import ingest
 import library
@@ -38,7 +40,7 @@ def _to_stem_layout(col, names):
 def _fake_summary_and_vectors(col, key):
     """Summaries text + .src sidecar and chunk/summary vectors for one
     chunk file, hashed exactly as summarize.py / ingest.embed_source do."""
-    import numpy as np
+    np = pytest.importorskip("numpy")       # BM25-only installs: no vectors
     cf = col.chunks_dir / (key + ".jsonl")
     n = sum(1 for l in open(cf) if l.strip())
     summ = col.summaries_dir / (key + ".jsonl")

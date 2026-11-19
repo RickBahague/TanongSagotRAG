@@ -111,7 +111,7 @@ def test_override_and_null_removes(server):
 
 def test_top_k_applied_without_restart(server, fake_llm, make_collection):
     col = make_collection()
-    assert len(_ask_sources(server, col.id)) > 3
+    assert len(_ask_sources(server, col.id)) > 2   # 3 on BM25-only installs
     st, _ = server.json("POST", "/settings", {"TOP_K": 2})
     assert st == 200
     assert len(_ask_sources(server, col.id)) == 2

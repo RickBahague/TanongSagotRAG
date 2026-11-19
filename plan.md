@@ -803,3 +803,38 @@ display suffer from header lines. Existing collections are not re-chunked.
   flow above. It also exposed a log bug: the crash hook replaced Python's
   default, so dev crashes stopped reaching the terminal; the hooks now
   chain.
+
+## Function-word stopwords and BM25-only tests — 2026-11-19
+
+Follow-up to "P4 items". Added to `STOPWORDS`: these those there here
+then than so if also been being am me my him she them into such very just
+each. Kept out on purpose: "us" (casefolded "US") and "may" ("May 1"),
+both JMS search terms. The token cache rebuilds by itself, because its tag
+hashes the stopword list.
+
+| Set | Variant | MRR before → after | Gate FA / FR before → after |
+|---|---|---|---|
+| JMS (96) | bm25 | 0.89 → 0.89 | — |
+| JMS | hybrid | 0.93 → 0.93 | 2 / 0 → 2 / 0 |
+| JMS | +rerank | 0.97 → 0.98 (hit@1 0.95 → 0.97) | 2 / 0 → 2 / 0 |
+| Fixtures, IBON | all | unchanged | unchanged |
+| 234 labelled incl. cross negatives | hybrid gate | — | JMS 3/0, IBON 0/0, fixtures 0/0 (unchanged) |
+| same | BM25-only gate | — | JMS 28/1 → 29/1, others unchanged |
+
+The one BM25-only change: "How does snow turn into glacial ice?" asked of
+JMS now passes ("into" dropped, so coverage rises). BM25-only gating on
+large corpora was already weak (28 of 48 negatives), and hybrid is
+unaffected. "And what about those?" now tokenizes to nothing, so a vague
+follow-up is gated out in every mode, as the follow-up rewrite expects.
+
+The 7 tests that failed on a BM25-only install (requirements.txt only)
+assumed dense retrieval. Now each holds in both modes:
+- `tests/helpers.py`: `has_dense()` and `gate_expected()`, with the known
+  BM25-only false reject (ice cores, `tests/test_gate.py`).
+- `test_m1d`: skips the vector part without numpy.
+- `test_m3a`/`test_m4a`: BM25-only ranks only chunks that contain a query
+  term, so the expected excerpt count is min(TOP_K, matching chunks).
+- `test_m5_2`: the off-topic question now shares one word ("volcanoes")
+  with the fixtures, so closest material exists in both modes.
+Results: dense install 322 passed; BM25-only venv 301 passed, 22 skipped
+(they need the encoder). CI has a new `bm25-only` job.

@@ -26,7 +26,11 @@ import errors
 STOPWORDS = set("""a an and are as at be but by for from has have he her his i in is it its
 of on or our that the their they this to was we were which with you your not no
 what why how when where who whom whose do does did can could should would
-say says said tell explain describe about""".split())
+say says said tell explain describe about
+these those there here then than so if also been being am me my him she
+them into such very just each""".split())
+# Not stopwords on purpose: "us" (casefolded "US", as in "US imperialism")
+# and "may" ("May 1"), both real search terms in the JMS collection.
 
 
 def _light_stem(w):

@@ -459,6 +459,7 @@ P3-6 extra formats and OCR, P3-7 cross-collection search, and from P4:
 signing/notarization, schema version, CLI subcommands, doc refresh. (P4's
 CI matrix, first-run model download, icon, GPU layers and logging were done
 on 2026-11-19.) Open from measurement: the multilingual `EMBED_MODEL`
-(needs a download), demonstratives as BM25 stopwords, and the two hard JMS
-negatives the gate still accepts. Pick these up as separate goals once M1–M4 are
+(needs a download) and the two hard JMS negatives the gate still accepts
+(function-word stopwords and BM25-only test coverage were done on
+2026-11-19). Pick these up as separate goals once M1–M4 are
 merged; the doc refresh in P4 is small enough to do by hand at that point.
