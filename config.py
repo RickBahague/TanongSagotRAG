@@ -30,8 +30,44 @@ PDF_STRIP_HEADERS = "off"     # "on" | "off"
 # Requires: pip install sentence-transformers numpy   (see requirements.txt)
 # bge models need a query-side instruction prefix (applied to queries only).
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-EMBED_QUERY_PREFIX = ("Represent this sentence for searching relevant passages: "
-                      if "bge" in EMBED_MODEL.lower() else "")
+# Per-model encoder profile: ONNX folder under models/, the prefixes the
+# model was trained with, and relevance-gate cosines measured for it (a
+# model's cosine scale is its own; bge's are the MIN_DENSE_SIM /
+# DENSE_SOLO_SIM defaults below). Unknown models get a folder from their
+# name, prefixes guessed from the family, and the default gate.
+ENCODER_PROFILES = {
+    "BAAI/bge-small-en-v1.5": {
+        "dir": "encoder-onnx",
+        "query_prefix": "Represent this sentence for searching relevant "
+                        "passages: ",
+        "passage_prefix": ""},
+    "intfloat/multilingual-e5-small": {
+        "dir": "encoder-onnx-multilingual-e5-small",
+        "query_prefix": "query: ", "passage_prefix": "passage: ",
+        # measured with the reranker veto on (plan.md "Multilingual model");
+        # without it e5 gates English poorly (cosines are compressed)
+        "gate": (0.75, 0.77)},
+}
+
+
+def encoder_profile(model=None):
+    model = str(model or EMBED_MODEL)
+    if model in ENCODER_PROFILES:
+        return ENCODER_PROFILES[model]
+    low = model.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", low.split("/")[-1]).strip("-")
+    if "bge" in low:
+        q, d = ENCODER_PROFILES["BAAI/bge-small-en-v1.5"]["query_prefix"], ""
+    elif "e5" in low:
+        q, d = "query: ", "passage: "
+    else:
+        q = d = ""
+    return {"dir": "encoder-onnx-" + slug, "query_prefix": q,
+            "passage_prefix": d}
+
+
+EMBED_QUERY_PREFIX = encoder_profile()["query_prefix"]
+EMBED_PASSAGE_PREFIX = encoder_profile()["passage_prefix"]
 
 # Summaries (stage 1b — generated like chunks, BEFORE embedding)
 SUMMARY_MAX_WORDS = 3000      # map-reduce window for long sections
@@ -51,6 +87,12 @@ RESTRICTED_WEIGHT = 2.0       # boost for chunks inside selected sections
 
 # Optional cross-encoder reranker over the final candidate pool
 RERANK = "auto"               # "auto" (on if a reranker model loads) | "off"
+# Reranker veto on the relevance gate (rag.rerank_veto_ok): a question the
+# signal gate accepts is still "not covered" when no candidate scores at
+# least RERANK_MIN_SCORE (ms-marco logit). Real questions >= -1.09, false
+# accepts -1.62 .. -6.99 on 234 labelled questions (plan.md "Reranker veto").
+RERANK_GATE = "auto"          # "auto" (on with the reranker) | "off"
+RERANK_MIN_SCORE = -1.35
 RERANK_POOL = 20              # top candidates the cross-encoder reorders
                               # (~45 ms each on CPU; JMS MRR 0.96 at 20,
                               # 0.95 at 60 — plan.md "M5-6 on JMS")
@@ -143,7 +185,7 @@ LLM_THREADS = 0                           # 0 = llama.cpp auto
 LLM_GPU_LAYERS = -1
 
 # ONNX query encoder (desktop builds; falls back to sentence-transformers)
-ONNX_ENCODER_DIR = ROOT / "models" / "encoder-onnx"
+ONNX_ENCODER_DIR = ROOT / "models" / encoder_profile()["dir"]
 # ONNX cross-encoder for RERANK (scripts/fetch_reranker.py); absent = no
 # reranking unless sentence-transformers is installed
 ONNX_RERANKER_DIR = ROOT / "models" / "reranker-onnx"
@@ -231,6 +273,9 @@ SETTINGS_SCHEMA = {
     "POOL_FACTOR": _s("int", min=1, max=50),
     "HIERARCHICAL": _s("enum", choices=["auto", "on", "off"]),
     "RERANK": _s("enum", choices=["auto", "off"]),
+    "RERANK_GATE": _s("enum", choices=["auto", "off"]),
+    "RERANK_MIN_SCORE": _s("float", min=-20.0, max=20.0,
+                           help="reranker veto floor (ms-marco logit)"),
     "RERANK_POOL": _s("int", min=1, max=200,
                       help="candidates the reranker reorders"),
     # quotes mode
@@ -254,6 +299,9 @@ _PATH_KEYS = {k for k, v in SETTINGS_SCHEMA.items() if v["type"] == "path"}
 # removed override restore whatever the value was before it (tests
 # monkeypatch module values; those are never clobbered).
 _APPLIED = {}
+_DEFAULT_MODEL = EMBED_MODEL                     # before settings.json
+_DEFAULT_GATE = (MIN_DENSE_SIM, DENSE_SOLO_SIM)
+_PROFILE_GATE = {}                               # gate values set by a profile
 SETTINGS_LOCK = threading.RLock()   # serializes settings read-merge-write
 
 
@@ -371,8 +419,13 @@ def reload_settings():
     were removed from the file restore the value they had replaced. Called
     at import and after every settings write, so changes apply without a
     restart."""
-    global EMBED_QUERY_PREFIX
+    global EMBED_QUERY_PREFIX, EMBED_PASSAGE_PREFIX, ONNX_ENCODER_DIR
     overrides = user_overrides()
+    # undo the model profile's gate values first, so a user override saves
+    # (and later restores) the real default, not a profile value
+    for i, key in enumerate(("MIN_DENSE_SIM", "DENSE_SOLO_SIM")):
+        if key in _PROFILE_GATE and globals().get(key) == _PROFILE_GATE.pop(key):
+            globals()[key] = _DEFAULT_GATE[i]
     for k in list(_APPLIED):
         if k not in overrides:
             applied, prev = _APPLIED.pop(k)
@@ -387,9 +440,17 @@ def reload_settings():
             prev = cur
         _APPLIED[k] = (v, prev)
         globals()[k] = v
-    EMBED_QUERY_PREFIX = ("Represent this sentence for searching relevant "
-                          "passages: " if "bge" in str(EMBED_MODEL).lower()
-                          else "")
+    prof = encoder_profile(EMBED_MODEL)
+    EMBED_QUERY_PREFIX = prof["query_prefix"]
+    EMBED_PASSAGE_PREFIX = prof["passage_prefix"]
+    ONNX_ENCODER_DIR = ROOT / "models" / prof["dir"]
+    # the model's own gate cosines, unless the user set them; switching back
+    # to the default model restores the defaults
+    gate = prof.get("gate") if str(EMBED_MODEL) != _DEFAULT_MODEL else None
+    for i, key in enumerate(("MIN_DENSE_SIM", "DENSE_SOLO_SIM")):
+        if gate and key not in overrides:
+            globals()[key] = gate[i]
+            _PROFILE_GATE[key] = gate[i]
 
 
 def save_user_settings(changes):

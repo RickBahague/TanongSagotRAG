@@ -77,6 +77,7 @@ def _clean_state(monkeypatch):
         Path(f).unlink(missing_ok=True)
     import rag
     rag._PARA_MAPS.clear()
+    rag._RERANK_MEMO.clear()
     if "serve" in sys.modules:
         sys.modules["serve"]._RUNTIMES.clear()
 

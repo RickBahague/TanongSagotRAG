@@ -1288,6 +1288,9 @@ def embed_source(col, chunk_file, force=False, shared=None, progress=None):
         def batch_done(done, _n, base=base):
             if progress:
                 progress(base + done, total)
+        # passage-side prefix of the model (e5: "passage: "; bge: none)
+        if config.EMBED_PASSAGE_PREFIX:
+            texts = [config.EMBED_PASSAGE_PREFIX + t for t in texts]
         vecs = model.encode(texts, normalize_embeddings=True,
                             batch_size=config.EMBED_BATCH,
                             progress=batch_done)

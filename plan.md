@@ -838,3 +838,72 @@ assumed dense retrieval. Now each holds in both modes:
   with the fixtures, so closest material exists in both modes.
 Results: dense install 322 passed; BM25-only venv 301 passed, 22 skipped
 (they need the encoder). CI has a new `bm25-only` job.
+
+## Reranker veto — 2026-11-19 (the two hard JMS negatives)
+
+The signal gate (BM25 + cosine) could not reject "How do armies of ants
+organize their colonies?" (cos 0.650) and "How do I join a political party
+in Canada?" (0.655): they share words with JMS, and real questions start at
+0.644. The cross-encoder reads question and passage together. Its best
+score over the candidate pool, on the 234 labelled questions:
+
+| Set | Real questions, lowest | Off-topic, highest |
+|---|---|---|
+| JMS (+ fixture questions as negatives) | 0.21 | −1.62 (Canada) |
+| IBON | −0.23 | −10.79 |
+| Fixtures (+ JMS/IBON negatives) | −1.09 | −8.75 |
+
+`rag.rerank_veto_ok`: when the signal gate accepts, the question is still
+"not covered" if the best reranker score is below `RERANK_MIN_SCORE`
+(−1.35, midway between −1.62 and −1.09). `RERANK_GATE` "auto"/"off". It
+never accepts what the signals reject. ms-marco is English-only: it gives
+every Greek question about +9, an English question over a French passage
+about −10, and the keyword query "STRASSENBAHN ZÜRICH" −1.9. So the veto,
+and now also the rerank reordering, apply only to an English sentence (≥ 3
+words, ≥ 10% English function words) whose top passage is English (≥ 12%;
+English chunks score ≥ 0.14, with 2 of 4,257 JMS chunks below; French and
+Greek 0, German 0.10). Scores are memoized, so the gate and the answer
+share one reranker run (about 0.7 s on JMS).
+
+| Gate FA / FR | JMS (111) | IBON (30) | Fixtures (93) | Mixed-language (37) |
+|---|---|---|---|---|
+| before (signals) | 3 / 0 | 0 / 0 | 0 / 0 | 3 / 4 |
+| **+ veto** | **0 / 0** | 0 / 0 | 0 / 0 | 3 / 4 |
+
+The user's real JMS collection (96 questions): FA 2 → 0, FR 0; hybrid MRR
+0.93, +rerank 0.98.
+
+## Multilingual model — 2026-11-19 (intfloat/multilingual-e5-small, opt-in)
+
+Downloaded with the user's approval (470 MB ONNX, pre-exported in the repo):
+`scripts/export_onnx.py --model intfloat/multilingual-e5-small`. New
+per-model `config.ENCODER_PROFILES`: ONNX folder, query/passage prefixes
+(e5: "query: " / "passage: ", applied at query time and at embed time),
+and the model's own gate cosines, which apply unless the user sets them.
+The cached encoder reloads when `EMBED_MODEL` changes. Test set: a
+37-question mixed-language collection (the French/Greek/German test
+documents plus the English fixtures; same-language, cross-language and
+off-topic questions in 4 languages), plus JMS, IBON and the fixtures
+re-embedded with e5.
+
+| MRR | bge hybrid | e5 hybrid | bge +rerank | e5 +rerank |
+|---|---|---|---|---|
+| Mixed-language | 0.83 | 0.90 | 0.86 | **0.92** |
+| JMS (English) | **0.93** | 0.87 | **0.98** | 0.97 |
+| Fixtures / IBON | 0.97 / 1.00 | 0.97 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
+
+e5's cosines are compressed: unrelated text sits at 0.72–0.85, so it gates
+English poorly without the veto (JMS ≥ 11 false accepts at any
+threshold). With the veto, its swept gate (MIN 0.75, SOLO 0.77) gives
+JMS 0/0, IBON 0/0, fixtures 0/0 and mixed-language 1/1. bge on the mixed
+set: 3/4. Off-topic Greek drops to cos 0.754–0.756 against 0.82–0.89 for
+real Greek questions. Remaining: "Quelle est la recette du gâteau au
+chocolat ?" (cos 0.794, French, so no veto) and "When was the Parthenon
+built on the Acropolis?" (hybrid ranks English passages above the Greek
+one, and the English reranker cannot see the match).
+
+Verdict: bge stays the default. Every current collection is English, where
+bge ranks better. e5 is the setting for collections in other languages or
+mixed languages (`EMBED_MODEL`, then re-ingest). Its ONNX folder is not in
+the desktop bundle; in the packaged app, switching needs the folder in
+`models/` (a first-run download like `modeldl.py` would be the follow-up).

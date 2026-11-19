@@ -109,10 +109,11 @@ def test_rerank_sees_section_heading(monkeypatch):
     monkeypatch.setattr(rag, "_RERANKER", fake)
     hits = [(1.0, {"essay": "Deep Sea Mining", "text": "short"}),
             (0.5, {"essay": "", "text": "a longer body"})]
-    out = rag._maybe_rerank("q", hits, "auto")
-    assert fake.pairs == [("q", "Deep Sea Mining. short"), ("q", "a longer body")]
+    q = "What is deep sea mining?"
+    out = rag._maybe_rerank(q, hits, "auto")
+    assert fake.pairs == [(q, "Deep Sea Mining. short"), (q, "a longer body")]
     assert [c["text"] for _, c in out] == ["short", "a longer body"]
-    assert rag._maybe_rerank("q", hits, "off") is hits
+    assert rag._maybe_rerank(q, hits, "off") is hits
 
 
 def test_get_reranker_prefers_onnx(monkeypatch, tmp_path):
@@ -145,7 +146,7 @@ def test_rerank_pool_limits_scored_hits(monkeypatch):
     monkeypatch.setattr(rag, "_RERANKER", fake)
     hits = [(9 - i, {"essay": "", "text": "t" * (i + 1), "id": i})
             for i in range(6)]
-    out = rag._maybe_rerank("q", hits, "auto", pool=3)
+    out = rag._maybe_rerank("What is the longest text?", hits, "auto", pool=3)
     assert len(fake.pairs) == 3
     assert [c["id"] for _, c in out] == [2, 1, 0, 3, 4, 5]
     scores = [s for s, _ in out]

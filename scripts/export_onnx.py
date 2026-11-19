@@ -6,6 +6,7 @@ ships a pre-exported onnx/model.onnx, so no torch/optimum export is needed —
 just download it:
 
   .venv/bin/python scripts/export_onnx.py
+  .venv/bin/python scripts/export_onnx.py --model intfloat/multilingual-e5-small
 
 Produces, in models/encoder-onnx/ (config.ONNX_ENCODER_DIR):
   model.onnx, tokenizer.json
@@ -25,7 +26,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import config  # noqa: E402
 
-OUT = config.ONNX_ENCODER_DIR
+if "--model" in sys.argv:            # fetch another model's folder
+    config.EMBED_MODEL = sys.argv[sys.argv.index("--model") + 1]
+OUT = config.ROOT / "models" / config.encoder_profile()["dir"]
 BASE = f"https://huggingface.co/{config.EMBED_MODEL}/resolve/main"
 FILES = {"model.onnx": f"{BASE}/onnx/model.onnx",
          "tokenizer.json": f"{BASE}/tokenizer.json",
@@ -50,7 +53,7 @@ def main():
     # verify the encoder loads and, if possible, matches sentence-transformers
     from encoder import OnnxEncoder
     texts = ["How do glaciers carve valleys over thousands of years?"]
-    enc = OnnxEncoder(OUT)
+    enc = OnnxEncoder(OUT, config.EMBED_MODEL)
     a = enc.encode(texts)[0]
     print(f"OnnxEncoder OK (dim={len(a)}, pooling={enc.pooling}, "
           f"max_len={enc.max_len})")

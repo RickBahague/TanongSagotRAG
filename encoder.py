@@ -236,6 +236,8 @@ def get_encoder():
     available. A failed attempt is not cached, so installing the encoder
     later works without a restart."""
     global _ENCODER
+    if _ENCODER is not None and _ENCODER.tag.get("model") != config.EMBED_MODEL:
+        _ENCODER = None                     # EMBED_MODEL changed in Settings
     if _ENCODER is None:
         with _LOCK:
             if _ENCODER is None:
@@ -250,7 +252,7 @@ def current_tag():
     """The {model, pooling, max_len} tag vectors must carry to be usable
     with the current encoder, or None when no encoder is available. On the
     ONNX path this reads only the config files (no model load)."""
-    if _ENCODER is not None:
+    if _ENCODER is not None and _ENCODER.tag.get("model") == config.EMBED_MODEL:
         return dict(_ENCODER.tag)
     if (Path(config.ONNX_ENCODER_DIR) / "model.onnx").exists():
         pooling, max_len = read_model_config(config.ONNX_ENCODER_DIR)

@@ -45,6 +45,7 @@ bash setup.sh                                 # one-time: .venv + requirements.t
 # GGUF is downloaded by the app on first use unless ANYRAG_BUNDLE_MODEL=1)
 bash scripts/build_desktop.sh
 .venv/bin/python scripts/fetch_reranker.py    # ONNX cross-encoder (RERANK)
+.venv/bin/python scripts/export_onnx.py --model intfloat/multilingual-e5-small  # multilingual encoder (EMBED_MODEL)
 dist/AnyRAG.app/Contents/MacOS/AnyRAG --smoke <docs>   # headless build check
 ```
 

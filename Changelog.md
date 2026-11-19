@@ -2,6 +2,34 @@
 
 ## 2026-11-19
 
+### Feature — Reranker veto on the relevance gate; multilingual encoder option
+The two off-topic JMS questions the gate still answered ("armies of ants",
+"political party in Canada") share words and embedding closeness with the
+books, so no cosine or keyword threshold could reject them. The user asked
+for them fixed, and for the multilingual model (download approved).
+- `rag.py`: `rerank_veto_ok`. A question the signal gate accepts is still
+  "not covered" when the cross-encoder scores no candidate at least
+  `RERANK_MIN_SCORE` (−1.35; new settings `RERANK_GATE`, `RERANK_MIN_SCORE`
+  in `config.py`). The English-only reranker (veto and reordering) now
+  applies only to English questions over English passages. Scores are
+  memoized, so the gate and the answer share one run. JMS gate errors
+  3 → 0, other sets unchanged; the user's real JMS collection has 0 false
+  accepts and 0 false rejects.
+- Multilingual: `config.ENCODER_PROFILES` gives each embedding model its
+  ONNX folder, query/passage prefixes and gate thresholds.
+  `scripts/export_onnx.py --model …` fetches another model. `ingest.py`
+  adds the passage prefix, and `encoder.py` reloads when `EMBED_MODEL`
+  changes. `intfloat/multilingual-e5-small` is available as an opt-in
+  setting: mixed-language MRR 0.86 → 0.92 and Greek false accepts 3 → 0,
+  but English JMS ranks slightly lower (0.98 → 0.97), so bge stays the
+  default.
+- Fixed while testing: removing a user gate value after a model switch
+  restored the profile's value instead of the default (`config.py`).
+- Tests: `tests/test_p6_veto_multilingual.py` (new); reranker tests in
+  `tests/test_p4_log_rerank.py` use English questions; `conftest.py`
+  clears the memo. Numbers in `plan.md` ("Reranker veto", "Multilingual
+  model").
+
 ### Bug fix — Vague follow-ups passed the keyword gate; tests failed on keyword-only installs
 "And what about those?" passed the keyword-only relevance gate because
 "those" was not a stopword. On an install with only `requirements.txt`

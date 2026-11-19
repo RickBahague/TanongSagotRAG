@@ -685,6 +685,19 @@ def load_index(col):
 
 
 _RERANKER = None
+_RERANK_MEMO = {}
+
+
+def _load_reranker():
+    """The cross-encoder, loaded once; False when unavailable."""
+    global _RERANKER
+    if _RERANKER is None:
+        try:
+            from encoder import get_reranker
+            _RERANKER = get_reranker()
+        except Exception:
+            _RERANKER = False               # unavailable; don't retry
+    return _RERANKER
 
 
 def _maybe_rerank(query, hits, mode=None, pool=None):
@@ -692,26 +705,29 @@ def _maybe_rerank(query, hits, mode=None, pool=None):
     `mode` is the collection's RERANK setting (default: config.RERANK).
     Only the first `pool` hits (RERANK_POOL) are scored; the rest keep
     their order after them."""
-    global _RERANKER
     mode = config.RERANK if mode is None else mode
     if mode == "off" or not hits:
         return hits
-    if _RERANKER is None:
-        try:
-            from encoder import get_reranker
-            _RERANKER = get_reranker()
-        except Exception:
-            _RERANKER = False               # unavailable; don't retry
-    if not _RERANKER:
+    # English-only cross-encoder: on other languages (and keyword queries)
+    # its order is noise — mixed-language MRR 0.90 -> 0.86 with it
+    if not _is_english_question(query):
+        return hits
+    if not _load_reranker():
         return hits
     # The section heading goes in with the text, as in tokenize(): headings
     # are stripped from chunk bodies, and without them the cross-encoder
     # lowered MRR on JMS (0.92 -> 0.86; with them 0.95, plan.md "M5-6").
     n = max(int(pool or config.RERANK_POOL), 1)
     head, tail = hits[:n], hits[n:]
-    scores = _RERANKER.predict([((query, (c.get("essay") or "") + ". "
-                                  + c["text"]) if c.get("essay")
-                                 else (query, c["text"])) for _, c in head])
+    key = (query, tuple(c.get("id") or id(c) for _, c in head))
+    scores = _RERANK_MEMO.get(key)
+    if scores is None:
+        scores = _RERANKER.predict([((query, (c.get("essay") or "") + ". "
+                                      + c["text"]) if c.get("essay")
+                                     else (query, c["text"])) for _, c in head])
+        if len(_RERANK_MEMO) >= 64:          # gate + answer share one run
+            _RERANK_MEMO.pop(next(iter(_RERANK_MEMO)))
+        _RERANK_MEMO[key] = scores
     ranked = sorted(((float(s), c) for s, (_, c) in zip(scores, head)),
                     key=lambda e: e[0], reverse=True)
     floor = ranked[-1][0] if ranked else 0.0
@@ -784,7 +800,57 @@ def dense_top_sim(dn, question):
 
 
 def gate_ok(index, question, bm25_hits=None):
-    """Is the question answerable from the corpus?
+    """Is the question answerable from the corpus? The retrieval-signal gate
+    (_signal_gate_ok) and, when the cross-encoder is on, its veto
+    (rerank_veto_ok)."""
+    return (_signal_gate_ok(index, question, bm25_hits)
+            and rerank_veto_ok(index, question))
+
+
+# English function words: the ms-marco cross-encoder is English-only. It
+# scores every Greek question about +9, an English question about a French
+# passage about -10, and a keyword query ("STRASSENBAHN ZÜRICH") -1.9, so
+# the veto applies only to an English sentence over English passages.
+_EN_FUNCTION = frozenset("""the of and to in is a an that for it on with as was
+by are be this what how why when who which do does did can could from at or
+not have has were their they there""".split())
+
+
+def _looks_english(text, min_share):
+    words = re.findall(r"[^\W\d_]+", text.lower())
+    if not words:
+        return False
+    return sum(w in _EN_FUNCTION for w in words) / len(words) >= min_share
+
+
+def _is_english_question(question):
+    return len(question.split()) >= 3 and _looks_english(question, 0.1)
+
+
+def rerank_veto_ok(index, question):
+    """False when the cross-encoder's best score over the candidate pool is
+    below RERANK_MIN_SCORE: none of the passages answers the question, even
+    though the words or the embedding look close. Measured on 234 labelled
+    questions (plan.md "Reranker veto"): real questions score >= -1.09,
+    off-topic ones that passed the signal gate -1.62 to -6.99. True (no
+    veto) when RERANK_GATE is off, RERANK is off, the reranker is
+    unavailable, or the question or its top passage is not English."""
+    if _cfg(index, "RERANK_GATE") == "off" or _cfg(index, "RERANK") == "off":
+        return True
+    if not _is_english_question(question):
+        return True
+    if not _load_reranker():
+        return True
+    k = _cfg(index, "TOP_K") * _cfg(index, "POOL_FACTOR")
+    pool = index.search(question, k)
+    if not pool or not _looks_english(pool[0][1]["text"], 0.12):
+        return True
+    ranked = _maybe_rerank(question, pool, "auto", _cfg(index, "RERANK_POOL"))
+    return ranked[0][0] >= _cfg(index, "RERANK_MIN_SCORE")
+
+
+def _signal_gate_ok(index, question, bm25_hits=None):
+    """The gate on retrieval signals (BM25 score/coverage and cosine).
 
     `bm25_hits` (optional): the caller's `index.bm25.search(question, k)`
     result, k >= TOP_K — reused instead of a second BM25 search. (Repeat
