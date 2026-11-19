@@ -635,3 +635,49 @@ Ollama `qwen2.5:1.5b` and the embedded GGUF (was 14 and 15), with no bare
 markers, header echoes or copied examples. Still open: the two election
 answers stay off-topic. That is the retrieval miss already in the JMS eval
 ("Can elections bring real social change?"), not a copy.
+
+## Gate thresholds on JMS — 2026-11-19 (MIN_DENSE_SIM 0.57 → 0.60, DENSE_SOLO_SIM 0.72 → 0.70)
+
+The JMS eval set was extended to 96 questions: 63 on-topic, each tied to a
+section, and 33 off-topic. 8 of the off-topic ones are hard negatives that
+share words with the corpus in another sense ("political party in Canada",
+"armies of ants", "state flower", "labor contractions", "youth soccer
+league"). Thresholds were swept over 234 labelled questions in three
+collections (scratch copies; top-1 cosine and the BM25 signal per
+question):
+
+| Set | On | Off | On-topic cos min | Off-topic cos max |
+|---|---|---|---|---|
+| JMS + fixture questions as negatives | 63 | 48 | 0.644 | 0.661 |
+| IBON (new 15-question set) + fixture negatives | 10 | 20 | 0.657 | 0.525 |
+| Fixtures + JMS/IBON questions as negatives | 15 | 78 | 0.614 | 0.537 |
+
+IBON and JMS questions were not used as negatives for each other, since
+both cover the Philippine economy.
+
+| Rule (FA / FR) | JMS | IBON | Fixtures | Total errors |
+|---|---|---|---|---|
+| before: MIN 0.57, SOLO 0.72 | 11 / 1 | 0 / 0 | 0 / 0 | 12 |
+| **after: MIN 0.60, SOLO 0.70** | **3 / 0** | 0 / 0 | 0 / 0 | **3** |
+
+Any MIN 0.60–0.61 with SOLO 0.64–0.71 gives the same 3 errors. 0.60 / 0.70
+leaves the most margin: the lowest on-topic fixture question (0.614) is
+0.014 above MIN, "What is the state of the Philippines?" (0.716) is 0.016
+above SOLO, and the highest off-topic score (0.661) is 0.039 below SOLO.
+The 3 remaining false accepts are hard JMS negatives that pass BM25 with
+cos 0.650–0.661 (ants, political party in Canada, and "ice cores … past
+climate" asked of JMS); separating those needs a better BM25 signal on
+large corpora, not a cosine threshold.
+
+`eval.py -c jms` on the real collection (96 questions), hybrid: hit@1
+0.89, hit@3 0.94, hit@10 0.98, recall@10 0.28, MRR 0.92; gate FA 9 → 2,
+FR 1 → 0 ("before" is from the per-question gate dump on the same 96
+questions). The fixture yardstick is unchanged (hit@10 1.0, MRR 0.967,
+0 FA / 0 FR; `verify.sh M4` passes). Still the one retrieval miss: "Can
+elections bring real social change?".
+
+**Chunk length vs the encoder limit on JMS** (input to the open P0-2
+`CHUNK_WORDS` decision): 3,345 of 4,257 chunks (79%) exceed bge-small's
+512 tokens (median 543, p90 587, max 1,383), so 6.7% of all chunk tokens
+are never embedded. `CHUNK_WORDS` ≈ 380 would fit most chunks; test it as
+an M5-style item on JMS (re-ingest, keep if hit@k/MRR not lower).

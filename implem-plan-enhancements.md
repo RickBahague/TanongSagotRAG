@@ -27,10 +27,11 @@ starts from a clean tree and can be rolled back on its own.
 | M4 | Settings, source management, ingest and chat UX (P3-1, P3-2, P3-4, P3-5) | 1, then 1 |
 | M5 | Remaining retrieval items, one goal each (P2-3…P2-7, P2-9) | 1 per item |
 
-Not in any agent run (needs you): a baseline on a real multi-document
-collection, macOS signing/notarization, a GitHub CI matrix, the
-first-run-download change to the bundle, and a manual click-through of the UI
-after M3 and M4 (there are no browser tests).
+Not in any agent run (needs you): macOS signing/notarization, a GitHub CI
+matrix, the first-run-download change to the bundle, and a manual
+click-through of the UI after M3 and M4 (there are no browser tests). The
+real-collection baseline is done: `jms`, 96 questions (`plan.md`, "JMS eval"
+and "Gate thresholds on JMS").
 
 ## Rules every agent prompt must include
 

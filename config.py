@@ -62,13 +62,15 @@ MIN_COVERAGE = 0.5        # fraction of query terms present in a top hit
 #   accept  if  cos >= DENSE_SOLO_SIM                       (dense alone)
 #           or  (BM25 signal passes  and  cos >= MIN_DENSE_SIM)
 # BM25-only indexes (no vectors / no encoder) use the BM25 signal alone,
-# unchanged. Measured on the fixture corpus, single-topic fixture
-# collections and writings/IBON (plan.md "M2 eval"; tiny corpora — re-run
-# on a real collection): on-topic top-1 cos >= 0.6118, off-topic <= 0.6383
-# (cross-topic science questions), off-topic that BM25 lets through
-# <= 0.5263, on-topic that BM25 rejects 0.8046.
-MIN_DENSE_SIM = 0.57      # cosine floor when BM25 agrees (BM25 FA veto)
-DENSE_SOLO_SIM = 0.72     # cosine at which dense alone passes the gate
+# unchanged. Set on 2026-11-19 from 234 labelled questions (plan.md "Gate
+# thresholds on JMS"): the real JMS collection (4,257 chunks, 63 on / 48
+# off-topic, hard negatives included), writings/IBON and the fixtures, with
+# cross-collection negatives. On-topic top-1 cos >= 0.614; off-topic
+# <= 0.661. On a large corpus BM25 passes many off-topic questions, so the
+# floor that BM25 needs (MIN_DENSE_SIM) matters most: 0.57 let 11 of 48 JMS
+# negatives through, 0.60 lets 3.
+MIN_DENSE_SIM = 0.60      # cosine floor when BM25 agrees (BM25 FA veto)
+DENSE_SOLO_SIM = 0.70     # cosine at which dense alone passes the gate
 RRF_K = 60                # reciprocal-rank-fusion constant (hybrid)
 HYBRID_CANDIDATES = 30    # candidates taken from each retriever before fusion
 

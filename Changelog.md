@@ -2,6 +2,23 @@
 
 ## 2026-11-19
 
+### Bug fix — Relevance gate retuned on the real JMS collection
+On a large collection the gate let too much through: with the M2
+thresholds, 9 of 33 off-topic JMS questions were answered, and "What is the
+state of the Philippines?" was refused. The JMS eval set was extended to
+96 questions (hard negatives included), and the two thresholds were swept
+over 234 labelled questions across JMS, IBON and the test documents.
+- `config.py`: `MIN_DENSE_SIM` 0.57 → 0.60, `DENSE_SOLO_SIM` 0.72 → 0.70.
+  Errors across the three sets: 12 → 3. On JMS: false accepts 9 → 2, false
+  rejects 1 → 0. IBON and the test documents stay at 0 / 0; retrieval
+  scores unchanged.
+- The JMS collection's `eval.jsonl` now has 96 questions. Numbers are in
+  `plan.md` ("Gate thresholds on JMS").
+- `implem-plan-enhancements.md`: the "needs you" list no longer asks for a
+  real-collection baseline (done on JMS). Measured for the open
+  `CHUNK_WORDS` question: 79% of JMS chunks exceed the encoder's 512-token
+  limit (6.7% of the text is not embedded).
+
 ### Bug fix — Follow-up answers copied earlier answers; JMS set up as the eval collection
 Reported from the JMS collection: "does election bring real social
 change?" came back as the previous answer word for word, and other
