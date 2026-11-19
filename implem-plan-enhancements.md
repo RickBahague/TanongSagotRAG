@@ -27,11 +27,13 @@ starts from a clean tree and can be rolled back on its own.
 | M4 | Settings, source management, ingest and chat UX (P3-1, P3-2, P3-4, P3-5) | 1, then 1 |
 | M5 | Remaining retrieval items, one goal each (P2-3…P2-7, P2-9) | 1 per item |
 
-Not in any agent run (needs you): macOS signing/notarization, a GitHub CI
-matrix, the first-run-download change to the bundle, and a manual
-click-through of the UI after M3 and M4 (there are no browser tests). The
-real-collection baseline is done: `jms`, 96 questions (`plan.md`, "JMS eval"
-and "Gate thresholds on JMS").
+Not in any agent run (needs you): macOS signing/notarization (needs an
+Apple Developer account), pushing so the CI workflow runs on GitHub for the
+first time, and a click-through of the UI by hand (there are no browser
+tests; the server flows are driven over HTTP, `plan.md` "P4 items"). Done
+on 2026-11-19: the real-collection baseline (`jms`, 96 questions), CI
+workflow, first-run model download, log file, app icon, GPU layers, the
+ONNX reranker (M5-6) and the chunk-size and header-stripping tests.
 
 ## Rules every agent prompt must include
 
@@ -453,7 +455,10 @@ IBON only; re-measure on a real collection. Numbers are in `plan.md`.
 
 ## Deferred (not planned for agents)
 
-P3-6 extra formats and OCR, P3-7 cross-collection search, and all of P4
-(CI matrix, first-run model download, signing, GPU layers, logging, CLI
-subcommands, doc refresh). Pick these up as separate goals once M1–M4 are
+P3-6 extra formats and OCR, P3-7 cross-collection search, and from P4:
+signing/notarization, schema version, CLI subcommands, doc refresh. (P4's
+CI matrix, first-run model download, icon, GPU layers and logging were done
+on 2026-11-19.) Open from measurement: the multilingual `EMBED_MODEL`
+(needs a download), demonstratives as BM25 stopwords, and the two hard JMS
+negatives the gate still accepts. Pick these up as separate goals once M1–M4 are
 merged; the doc refresh in P4 is small enough to do by hand at that point.

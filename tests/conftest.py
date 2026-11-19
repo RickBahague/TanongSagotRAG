@@ -68,6 +68,9 @@ def _clean_state(monkeypatch):
     monkeypatch.setattr(config, "LLM_BACKEND", "openai")
     monkeypatch.setattr(config, "LLM_URL", UNREACHABLE_LLM)
     monkeypatch.setattr(config, "LLM_MODEL", "test-model")
+    # the ONNX reranker (models/reranker-onnx, when fetched) costs ~1 s per
+    # question; tests that need it pass mode="auto" or set RERANK back
+    monkeypatch.setattr(config, "RERANK", "off")
     yield
     shutil.rmtree(library.COLLECTIONS_DIR, ignore_errors=True)
     for f in (library.REGISTRY, config.USER_ROOT / "settings.json"):

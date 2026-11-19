@@ -19,6 +19,12 @@ SETTINGS_FILE = USER_ROOT / "settings.json"
 # Chunking (stage 1 — always runs first for every new source)
 CHUNK_WORDS = 450         # ~ 600 tokens
 CHUNK_OVERLAP_WORDS = 80
+# Strip PDF running headers/footers found by frequency (ingest.
+# repeated_edge_lines). Off by default: on JMS it removed 88% of header
+# lines from chunk text but lowered hybrid MRR 0.93 -> 0.92 (running
+# headers repeat the section title, which helps ranking) and let one more
+# off-topic question through (plan.md "PDF running headers").
+PDF_STRIP_HEADERS = "off"     # "on" | "off"
 
 # Embedding (stage 2 — optional; runs only on already-chunked sources).
 # Requires: pip install sentence-transformers numpy   (see requirements.txt)
@@ -44,7 +50,10 @@ SUMMARY_TOP_M = 8             # sections selected in the explore stage
 RESTRICTED_WEIGHT = 2.0       # boost for chunks inside selected sections
 
 # Optional cross-encoder reranker over the final candidate pool
-RERANK = "auto"               # "auto" (on if model importable) | "off"
+RERANK = "auto"               # "auto" (on if a reranker model loads) | "off"
+RERANK_POOL = 20              # top candidates the cross-encoder reorders
+                              # (~45 ms each on CPU; JMS MRR 0.96 at 20,
+                              # 0.95 at 60 — plan.md "M5-6 on JMS")
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # Retrieval
@@ -120,12 +129,25 @@ TEMPERATURE = 0.3
 LLM_MAX_TOKENS = 1024                     # generation cap (runaway guard)
 
 # Embedded backend (llama-cpp-python)
-LLM_MODEL_PATH = ROOT / "models" / "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+# The bundled GGUF when the build includes it (dev checkout, or
+# ANYRAG_BUNDLE_MODEL=1); otherwise the copy the app downloads on first use
+# into the user-data dir (modeldl.py).
+_GGUF = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+LLM_MODEL_PATH = (ROOT / "models" / _GGUF
+                  if (ROOT / "models" / _GGUF).is_file()
+                  else USER_ROOT / "models" / _GGUF)
 LLM_CTX = 8192                            # context window for embedded model
 LLM_THREADS = 0                           # 0 = llama.cpp auto
+# layers offloaded to the GPU (Metal on Apple silicon, CUDA/Vulkan builds
+# elsewhere): -1 = all, 0 = CPU only. Ignored by a CPU-only llama.cpp.
+LLM_GPU_LAYERS = -1
 
 # ONNX query encoder (desktop builds; falls back to sentence-transformers)
 ONNX_ENCODER_DIR = ROOT / "models" / "encoder-onnx"
+# ONNX cross-encoder for RERANK (scripts/fetch_reranker.py); absent = no
+# reranking unless sentence-transformers is installed
+ONNX_RERANKER_DIR = ROOT / "models" / "reranker-onnx"
+RERANK_MAX_LEN = 512
 
 # Web UI
 HOST = "127.0.0.1"
@@ -183,6 +205,9 @@ SETTINGS_SCHEMA = {
                          help="generation cap (tokens)"),
     "LLM_THREADS": _s("int", "global", min=0, max=256,
                       help="embedded backend threads (0 = auto)"),
+    "LLM_GPU_LAYERS": _s("int", "global", min=-1, max=1000,
+                         help="embedded model layers on the GPU "
+                              "(-1 = all, 0 = CPU only)"),
     "SUMMARY_WORKERS": _s("int", "global", min=1, max=32,
                           help="concurrent LLM calls while summarizing"),
     "EMBED_MODEL": _s("str", "global", "reingest", maxlen=200,
@@ -206,6 +231,8 @@ SETTINGS_SCHEMA = {
     "POOL_FACTOR": _s("int", min=1, max=50),
     "HIERARCHICAL": _s("enum", choices=["auto", "on", "off"]),
     "RERANK": _s("enum", choices=["auto", "off"]),
+    "RERANK_POOL": _s("int", min=1, max=200,
+                      help="candidates the reranker reorders"),
     # quotes mode
     "QUOTES_TOP_K": _s("int", min=1, max=100),
     "QUOTES_TEMPERATURE": _s("float", min=0.0, max=2.0),
@@ -213,6 +240,8 @@ SETTINGS_SCHEMA = {
     # chunking
     "CHUNK_WORDS": _s("int", effect="reingest", min=50, max=5000),
     "CHUNK_OVERLAP_WORDS": _s("int", effect="reingest", min=0, max=2000),
+    "PDF_STRIP_HEADERS": _s("enum", effect="reingest", choices=["off", "on"],
+                            help="remove repeated PDF page headers/footers"),
     # follow-ups (P2-1)
     "FOLLOWUP_TURNS": _s("int", min=0, max=20),
     "HISTORY_ANSWER_WORDS": _s("int", min=0, max=2000),

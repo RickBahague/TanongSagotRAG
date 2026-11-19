@@ -681,3 +681,125 @@ elections bring real social change?".
 512 tokens (median 543, p90 587, max 1,383), so 6.7% of all chunk tokens
 are never embedded. `CHUNK_WORDS` ≈ 380 would fit most chunks; test it as
 an M5-style item on JMS (re-ingest, keep if hit@k/MRR not lower).
+
+## Chunk size on JMS — 2026-11-19 (kept CHUNK_WORDS 450)
+
+JMS re-ingested on scratch copies with the overlap scaled to match (80 per
+450 words). 96-question `eval.py -c jms`, hybrid:
+
+| CHUNK_WORDS / overlap | Chunks | hit@1 | hit@3 | hit@10 | recall@10 | MRR | FA / FR |
+|---|---|---|---|---|---|---|---|
+| **450 / 80 (current)** | 4,257 | 0.89 | 0.94 | 0.98 | 0.28 | **0.92** | 2 / 0 |
+| 380 / 67 | 4,993 | 0.83 | 0.94 | 0.97 | 0.27 | 0.88 | 2 / 0 |
+| 320 / 56 | 5,896 | 0.81 | 0.92 | 0.98 | 0.26 | 0.88 | 3 / 0 |
+
+Smaller chunks fit the 512-token encoder but rank worse: a 450-word chunk
+carries more of its section's context, which outweighs the ~7% of tokens
+past the limit that are not embedded. Verdict: keep 450. The P0-2
+`CHUNK_WORDS` question is closed.
+
+## M5-6 on JMS — 2026-11-19 (P2-7: ONNX reranker, kept)
+
+Downloaded with the user's approval: `cross-encoder/ms-marco-MiniLM-L-6-v2`
+as the repo's own pre-exported `onnx/model.onnx` (91 MB, no torch export),
+fetched by the new `scripts/fetch_reranker.py` into `models/reranker-onnx/`.
+`encoder.OnnxReranker` runs it on onnxruntime + tokenizers (pair encoding,
+`only_second` truncation at 512); `encoder.get_reranker()` prefers it over
+sentence-transformers' CrossEncoder, so reranking now works in the bundle.
+
+`eval.py --variants`, +rerank over the hybrid base:
+
+| Input to the cross-encoder | Pool | JMS MRR | JMS recall@10 | Fixtures MRR | IBON MRR |
+|---|---|---|---|---|---|
+| (no rerank: hybrid) | – | 0.92 | 0.28 | 0.97 | 1.00 |
+| chunk text only | 60 | 0.86 | 0.25 | 1.00 | 1.00 |
+| section heading + text | 60 | 0.95 | 0.37 | 1.00 | – |
+| **section heading + text** | **20** | **0.96** | 0.36 | 1.00 | – |
+
+Headings are stripped from chunk bodies, so text-only reranking lost the
+section match that BM25 gets from `tokenize()`; with the heading the
+reranker wins. Gate errors are unchanged (the gate does not use it).
+Cost: about 45 ms per passage on CPU (60 passages 2.6 s, 20 about 0.9 s),
+so `RERANK_POOL` = 20 (new setting) reorders only the top 20 candidates.
+Verdict: keep (RERANK "auto" uses it when the model is present). The
+bundle grows by 91 MB. Tests pin `RERANK` off (conftest) except the
+reranker tests, so the suite still runs in about 45 s.
+
+## JMS "elections" miss — 2026-11-19 (label, not retrieval)
+
+"Can elections bring real social change?" was the one JMS miss in every
+variant. Retrieval was right; the eval label was too narrow. The top
+hybrid hit ("Consolidate the People's Gains in the Electoral Struggle")
+says "it is not possible to make a fundamental change of the ruling system
+through periodic elections", and rank 6 says "Elections under the auspices
+of the US-Marcos clique cannot bring about any fundamental change". Neither
+matched the pattern. The pattern now also accepts those passages and
+"electoral struggle". Real JMS collection after the fix: hybrid hit@10
+1.00, MRR 0.93; +rerank MRR 0.97.
+
+## PDF running headers — 2026-11-19 (opt-in, off by default)
+
+Survey of the 12 JMS PDFs: 1,681 of 4,450 pages start or end with a line
+repeated across the document. `clean_page`'s odd-page rule removed some;
+1,068 pages kept one in the chunk text ("Building Strength Through
+Struggle", "ó ó ó" dividers, "Page 3/120").
+
+`ingest.repeated_edge_lines` / `strip_edge_lines`: a line in the first or
+last 2 lines of a page, normalized (lowercase, digits → #), that repeats at
+the edge of at least 4 pages and 3% of the document is stripped from page
+edges. Date lines ("12 May 1986") and digit-only lines other than a bare
+page number are kept. JMS re-ingested with it, 96 questions:
+
+| | Header phrases in chunk text | hybrid MRR | +rerank MRR | Gate FA |
+|---|---|---|---|---|
+| off (current) | 724 | 0.93 | 0.97 | 2 |
+| on | 89 | 0.92 | 0.97 | 3 |
+
+It does not help ranking: a running header usually repeats the section
+title, and that repetition helps BM25 ("How did Marcos usurp absolute
+power?" fell from rank 3 to 7). An off-topic question ("book club")
+rose from cosine 0.577 to 0.604 and passed the gate. Verdict: kept as the
+per-collection setting `PDF_STRIP_HEADERS` ("off" by default; "on"
+re-chunks that collection), for collections whose quotes and reader
+display suffer from header lines. Existing collections are not re-chunked.
+
+## P4 items — 2026-11-19
+
+- **GPU:** `LLM_GPU_LAYERS` (default -1 = all layers; 0 = CPU). Same
+  1,729-token prompt + ~150-token answer on this Mac (Metal): CPU 8.3 s,
+  GPU 3.7 s; model load 1.0 s → 0.2 s. If GPU loading fails, the model
+  loads on the CPU.
+- **App icon:** `scripts/make_icon.py` draws `assets/anyrag.png` and
+  `assets/anyrag.icns` with no image library (stdlib PNG + sips/iconutil).
+  `anyrag.spec` passes it to both the executable and the `.app` bundle
+  (before, only to the executable, so the bundle showed PyInstaller's icon).
+- **First-run model download:** `modeldl.py`. The bundle no longer contains
+  the GGUF unless built with `ANYRAG_BUNDLE_MODEL=1`. `config.LLM_MODEL_PATH`
+  is the bundled file when present, else `<data>/models/<gguf>`. The UI
+  shows a banner and a Settings button: progress, cancel, resume (HTTP
+  Range on `.part`), SHA-256 check against the Hugging Face hash. The macOS
+  bundle went from ~1.5 GB to 362 MB (with the 91 MB reranker). Tested
+  against Hugging Face: 146 MB at 24 MB/s, cancel kept the part, resume
+  continued from it.
+- **Log:** `applog.py`, `<data>/logs/anyrag.log` (1 MB × 3). Settings → Log:
+  "Open log folder", "Show recent log".
+- **CI:** `.github/workflows/ci.yml`. Tests on Linux/macOS/Windows; then
+  PyInstaller builds on all three and `AnyRAG --smoke <fixtures>`
+  (`smoke.py`): ingest, search, gate, encoder, reranker, llama.cpp
+  library, HTTP with the token cookie. Not run on GitHub yet (nothing
+  pushed). Locally: the frozen macOS app passes `--smoke`. A clean venv
+  with only `requirements.txt` + dev deps fails 8 tests that assume the
+  dense encoder, so CI installs numpy/onnxruntime/tokenizers and fetches
+  the encoder; with those, 320 passed.
+- **BM25-only gap found by that run:** "And what about those?" passes the
+  BM25-only gate on the fixtures because "those" is not a stopword. Hybrid
+  installs reject it. Adding demonstratives to `STOPWORDS` changes BM25
+  scoring everywhere, so it needs its own eval; not changed.
+- **HTTP drive** of the source server with the embedded model (25 checks,
+  all pass): token cookie, settings (new keys, validation), linked
+  collection create + streamed ingest, search, ask with numbered citations
+  (2.0 s on GPU), a follow-up rewritten without copying (1% 8-gram
+  overlap), off-topic gated, conversation saved, `/logs`, and the download
+  flow above. It also exposed a log bug: the crash hook replaced Python's
+  default, so dev crashes stopped reaching the terminal; the hooks now
+  chain.

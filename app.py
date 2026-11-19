@@ -9,11 +9,20 @@ Each launch generates a random session token: the server requires it (as an
 HttpOnly cookie, set when the window first loads /?token=…), so other local
 processes and web pages can't drive the app's API.
 """
+import os
 import secrets
 import socket
+import sys
+import tempfile
 import threading
 import webbrowser
 
+# --smoke <docs>: headless self-test of the build on a throwaway data dir.
+# ANYRAG_HOME must be set before config/paths are imported.
+if __name__ == "__main__" and "--smoke" in sys.argv:
+    os.environ["ANYRAG_HOME"] = tempfile.mkdtemp(prefix="anyrag-smoke-")
+
+import applog
 import config
 import serve
 
@@ -53,6 +62,7 @@ class DesktopApi:
 
 
 def main():
+    applog.setup()              # the packaged app has no console
     port = free_port()
     token = secrets.token_urlsafe(32)
     httpd = serve.make_server(port, token=token)
@@ -82,4 +92,10 @@ def main():
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()   # PyInstaller + chunk-stage process pool
+    if "--smoke" in sys.argv:
+        import shutil
+        import smoke
+        code = smoke.main(sys.argv[sys.argv.index("--smoke") + 1:])
+        shutil.rmtree(os.environ["ANYRAG_HOME"], ignore_errors=True)
+        sys.exit(code)
     main()

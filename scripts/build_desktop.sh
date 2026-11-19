@@ -7,9 +7,12 @@ cd "$(dirname "$0")/.."
 [ -d .venv ] || bash setup.sh
 .venv/bin/pip install -q -r requirements-app.txt
 
-# assets the bundle needs (no corpus — the app ships empty)
-.venv/bin/python scripts/fetch_model.py
+# assets the bundle needs (no corpus — the app ships empty). The 1.1 GB
+# GGUF is downloaded by the app on first use unless ANYRAG_BUNDLE_MODEL=1.
 [ -f models/encoder-onnx/model.onnx ] || .venv/bin/python scripts/export_onnx.py
+.venv/bin/python scripts/fetch_reranker.py
+if [ "${ANYRAG_BUNDLE_MODEL:-0}" = "1" ]; then .venv/bin/python scripts/fetch_model.py; fi
+[ -f assets/anyrag.icns ] || .venv/bin/python scripts/make_icon.py
 
 .venv/bin/pyinstaller --noconfirm anyrag.spec
 

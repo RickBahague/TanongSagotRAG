@@ -37,6 +37,10 @@ All corpus routes are collection-scoped under /c/<id>/…:
   GET    /c/<id>/conversations      history; /conversation/<cid>[/export]
   GET    /c/<id>/source-meta        editable per-source metadata
   POST   /c/<id>/source-meta        {filename, title?, years?}
+  GET    /logs                      {path, folder, tail} of the app log
+  GET    /model/download            first-run model download status
+  POST   /model/download            start/resume it; /model/download/cancel
+  POST   /logs/open                 open the log folder (file manager)
 
 Local-server hardening (every request): the Host header must be
 127.0.0.1/localhost on the bound port; an Origin header, when present, must
@@ -59,13 +63,18 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
+import logging
+
+import applog
 import config
+import modeldl
 import conversations
 import errors
 import library
 import rag
 
 INDEX_HTML_FILE = Path(__file__).parent / "static" / "index.html"
+log = logging.getLogger("anyrag.serve")
 
 MAX_RUNTIMES = 3
 MAX_JSON_BODY = 10 * 1024 * 1024       # JSON POST bodies
@@ -326,9 +335,14 @@ def backend_status(backend=None, url=None, model=None, model_path=None,
         lib_err = rag.llama_cpp_error()     # imports it: catches a missing .dylib
         out.update(url=None, model=path.name, model_path=str(path),
                    file_exists=exists, llama_cpp=lib_err is None,
-                   model_present=exists, reachable=exists and lib_err is None)
+                   model_present=exists, reachable=exists and lib_err is None,
+                   downloadable=(not exists
+                                 and modeldl.is_download_target(path)),
+                   download=modeldl.status())
         if not exists:
-            out["error"] = f"model file missing: {path}"
+            out["error"] = (f"model not downloaded yet: {path}"
+                            if out["downloadable"] else
+                            f"model file missing: {path}")
         elif lib_err:
             out["error"] = lib_err
         return out
@@ -743,6 +757,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(409, msg)
         except BrokenPipeError:
             pass
+        except Exception:
+            log.exception("%s %s failed", self.command, self.path.split("?")[0])
+            if not self._streaming:
+                try:
+                    self._err(500, "internal error — see the log "
+                              "(Settings → Open log folder)")
+                except Exception:
+                    pass
 
     def _stream_error(self, msg):
         try:
@@ -809,6 +831,12 @@ class Handler(BaseHTTPRequestHandler):
             q = {k: (qs or {}).get(k, [None])[0]
                  for k in ("backend", "url", "model", "model_path")}
             self._json(backend_status(**q))
+        elif path == "/model/download":
+            self._json(modeldl.status())
+        elif path == "/logs":
+            self._json({"path": str(applog.log_file()),
+                        "folder": str(applog.log_dir()),
+                        "tail": applog.tail(200)})
         else:
             self._err(404, "not found")
 
@@ -951,6 +979,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._create_collection(self._body())
             if path == "/settings":
                 return self._post_global_settings(self._body())
+            if path == "/model/download":
+                self._body()
+                return self._json(modeldl.start())
+            if path == "/model/download/cancel":
+                self._body()
+                return self._json(modeldl.cancel())
+            if path == "/logs/open":
+                self._body()            # JSON POST rules apply (CSRF)
+                return self._json({"folder": str(applog.open_folder())})
             return self._err(404, "not found")
         # JSON routes: Content-Type + size are enforced before anything else
         req = None if path in _NON_JSON_POSTS else self._body()
@@ -1164,7 +1201,10 @@ class Handler(BaseHTTPRequestHandler):
             self._err(400, str(e))
 
     def log_message(self, fmt, *args):
-        pass
+        pass                            # no per-request access log
+
+    def log_error(self, fmt, *args):
+        log.warning("http: " + fmt, *args)
 
 
 def make_server(port=config.PORT, token=None):
@@ -1172,11 +1212,14 @@ def make_server(port=config.PORT, token=None):
     `token`, every request must carry the per-launch session cookie, which
     GET /?token=<token> sets (see Handler._check_access)."""
     httpd = ThreadingHTTPServer((config.HOST, port), Handler)
+    httpd.handle_error = lambda request, addr: log.exception(
+        "request from %s failed", addr)
     httpd.token = token or None
     return httpd
 
 
 if __name__ == "__main__":
+    applog.setup()
     n = len(library.list_all())
     print(f"AnyRAG on http://{config.HOST}:{config.PORT}  "
           f"({n} collection(s), {config.LLM_BACKEND}/{config.LLM_MODEL})")

@@ -36,6 +36,7 @@ changes that move the number (design.md S5: measure, don't guess).
 import argparse
 import contextlib
 import importlib.util
+from pathlib import Path
 import json
 import re
 import sys
@@ -79,8 +80,10 @@ class RerankIndex:
 
 def _rerank_available():
     """None if the cross-encoder loads, else a reason string."""
-    if importlib.util.find_spec("sentence_transformers") is None:
-        return "sentence_transformers not installed"
+    if (not (Path(config.ONNX_RERANKER_DIR) / "model.onnx").exists()
+            and importlib.util.find_spec("sentence_transformers") is None):
+        return ("no reranker: run scripts/fetch_reranker.py (or install "
+                "sentence-transformers)")
     if config.RERANK == "off":
         return "RERANK is off in config"
     try:

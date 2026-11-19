@@ -683,24 +683,35 @@ def load_index(col):
 _RERANKER = None
 
 
-def _maybe_rerank(query, hits, mode=None):
+def _maybe_rerank(query, hits, mode=None, pool=None):
     """Optional cross-encoder reordering of the candidate pool (S4b).
-    `mode` is the collection's RERANK setting (default: config.RERANK)."""
+    `mode` is the collection's RERANK setting (default: config.RERANK).
+    Only the first `pool` hits (RERANK_POOL) are scored; the rest keep
+    their order after them."""
     global _RERANKER
     mode = config.RERANK if mode is None else mode
     if mode == "off" or not hits:
         return hits
     if _RERANKER is None:
         try:
-            from sentence_transformers import CrossEncoder
-            _RERANKER = CrossEncoder(config.RERANK_MODEL)
+            from encoder import get_reranker
+            _RERANKER = get_reranker()
         except Exception:
             _RERANKER = False               # unavailable; don't retry
     if not _RERANKER:
         return hits
-    scores = _RERANKER.predict([(query, c["text"]) for _, c in hits])
-    return sorted(((float(s), c) for s, (_, c) in zip(scores, hits)),
-                  key=lambda e: e[0], reverse=True)
+    # The section heading goes in with the text, as in tokenize(): headings
+    # are stripped from chunk bodies, and without them the cross-encoder
+    # lowered MRR on JMS (0.92 -> 0.86; with them 0.95, plan.md "M5-6").
+    n = max(int(pool or config.RERANK_POOL), 1)
+    head, tail = hits[:n], hits[n:]
+    scores = _RERANKER.predict([((query, (c.get("essay") or "") + ". "
+                                  + c["text"]) if c.get("essay")
+                                 else (query, c["text"])) for _, c in head])
+    ranked = sorted(((float(s), c) for s, (_, c) in zip(scores, head)),
+                    key=lambda e: e[0], reverse=True)
+    floor = ranked[-1][0] if ranked else 0.0
+    return ranked + [(floor - 1 - i, c) for i, (_, c) in enumerate(tail)]
 
 
 def diversify(hits, k, cap=None):
@@ -838,10 +849,11 @@ def reset_backend():
 
 def _embedded_llm():
     """Lazy-load the bundled GGUF once (first question pays the load cost);
-    reloaded when LLM_MODEL_PATH / LLM_CTX / LLM_THREADS change."""
+    reloaded when LLM_MODEL_PATH / LLM_CTX / LLM_THREADS / LLM_GPU_LAYERS
+    change."""
     global _EMBEDDED_LLM, _EMBEDDED_KEY
     want = (str(config.get("LLM_MODEL_PATH")), config.get("LLM_CTX"),
-            config.get("LLM_THREADS"))
+            config.get("LLM_THREADS"), config.get("LLM_GPU_LAYERS"))
     if _EMBEDDED_KEY is not None and _EMBEDDED_KEY != want:
         _EMBEDDED_LLM = None
     if _EMBEDDED_LLM is None:
@@ -850,11 +862,25 @@ def _embedded_llm():
             raise RuntimeError(err)
         from llama_cpp import Llama
         if not Path(want[0]).exists():
+            import modeldl
+            if modeldl.is_download_target(want[0]):
+                raise RuntimeError("The answer model is not downloaded yet "
+                                   "(1.1 GB, once): Settings → Download "
+                                   "model.")
             raise RuntimeError(f"Model file missing: {want[0]}")
         kwargs = {"model_path": want[0], "n_ctx": want[1], "verbose": False}
         if want[2]:
             kwargs["n_threads"] = want[2]
-        _EMBEDDED_LLM = Llama(**kwargs)
+        if want[3]:
+            kwargs["n_gpu_layers"] = want[3]
+        try:
+            _EMBEDDED_LLM = Llama(**kwargs)
+        except Exception:
+            if not kwargs.pop("n_gpu_layers", None):
+                raise
+            # a GPU that can't take the model: fall back to the CPU
+            print("[rag] GPU offload failed — loading the model on the CPU")
+            _EMBEDDED_LLM = Llama(**kwargs)
         _EMBEDDED_KEY = want
     return _EMBEDDED_LLM
 
@@ -1676,7 +1702,8 @@ def search_passages(col, question, index=None, k=None):
     k = _cfg(col, "TOP_K") if k is None else int(k)
     k = max(1, min(k, 50))
     pool = index.search(question, k * _cfg(col, "POOL_FACTOR"))
-    hits = diversify(_maybe_rerank(question, pool, _cfg(col, "RERANK")), k,
+    hits = diversify(_maybe_rerank(question, pool, _cfg(col, "RERANK"),
+                                   _cfg(col, "RERANK_POOL")), k,
                      cap=_cfg(col, "MAX_PER_WORK"))
     return {"question": question, "covered": bool(gate_ok(index, question)),
             "results": [passage_info(c, s) for s, c in hits]}
@@ -1723,7 +1750,8 @@ def ask_stream(col, question, mode="scholar", index=None, k=None,
     era = parse_era(query)
     pool = apply_era(index.search(query, k * _cfg(col, "POOL_FACTOR")),
                      era, k)
-    hits = diversify(_maybe_rerank(query, pool, _cfg(col, "RERANK")), k,
+    hits = diversify(_maybe_rerank(query, pool, _cfg(col, "RERANK"),
+                                   _cfg(col, "RERANK_POOL")), k,
                      cap=_cfg(col, "MAX_PER_WORK"))        # best-first
     model = backend = burl = None
     persona = col.persona

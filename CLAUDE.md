@@ -41,8 +41,11 @@ bash setup.sh                                 # one-time: .venv + requirements.t
 # retrieval quality (per-collection data/eval.jsonl of {"q", "expect"} pairs)
 .venv/bin/python eval.py -c <collection-id> [--compare] [-k 10]
 
-# desktop packaging (fetches GGUF + exports ONNX encoder, then PyInstaller)
+# desktop packaging (ONNX encoder + reranker, icon, then PyInstaller; the
+# GGUF is downloaded by the app on first use unless ANYRAG_BUNDLE_MODEL=1)
 bash scripts/build_desktop.sh
+.venv/bin/python scripts/fetch_reranker.py    # ONNX cross-encoder (RERANK)
+dist/AnyRAG.app/Contents/MacOS/AnyRAG --smoke <docs>   # headless build check
 ```
 
 Tests: `pytest` (dev-only, `requirements-dev.txt`) runs against a temp

@@ -38,6 +38,7 @@ import json
 import math
 import os
 import re
+from collections import Counter
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -282,6 +283,78 @@ def clean_page(text, printed_page, book_title):
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
+
+
+# Running headers/footers (P5 follow-up, measured on JMS): a line at a page
+# edge (first/last EDGE_LINES non-empty lines) whose normalized form —
+# lowercased, digits -> "#", spaces collapsed — sits at the edge of at least
+# EDGE_MIN_PAGES pages and EDGE_MIN_SHARE of the document's pages is a
+# running header, footer or page-number pattern ("Page 3/120") and is
+# stripped from those edges. clean_page's odd-page rule only caught a header
+# on the first line of odd pages: 1,068 of 4,450 JMS pages kept one.
+EDGE_LINES = 2
+EDGE_MIN_PAGES = 4
+EDGE_MIN_SHARE = 0.03
+
+
+# a repeated "12 May 1986"-style line heads dated pieces (letters, speeches)
+# and feeds dates.py, so it is never treated as a running header
+_EDGE_DATE = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+                        r"[a-z]*\.?\b.*#|#.*\b(jan|feb|mar|apr|may|jun|jul|"
+                        r"aug|sep|oct|nov|dec)[a-z]*\b")
+
+
+def _edge_norm(line):
+    return re.sub(r"\d+", "#", re.sub(r"\s+", " ", line.strip().lower()))
+
+
+def repeated_edge_lines(texts):
+    """Normalized lines repeated at page edges across `texts` (one string
+    per page). A bare page number ('#') and patterns such as 'page #/#'
+    count; other digit-and-dot-only lines ('#.', list numbers) and date
+    lines do not."""
+    pages = [t for t in texts if t and t.strip()]
+    counts = Counter()
+    for t in pages:
+        ls = [l for l in t.splitlines() if l.strip()]
+        counts.update({_edge_norm(l) for l in ls[:EDGE_LINES] + ls[-EDGE_LINES:]})
+    need = max(EDGE_MIN_PAGES, EDGE_MIN_SHARE * len(pages))
+    return {k for k, n in counts.items()
+            if n >= need and (k == "#" or k.strip("#. "))
+            and not _EDGE_DATE.search(k)}
+
+
+def strip_edge_lines(text, repeated):
+    """Drop repeated header/footer lines from the top and bottom
+    EDGE_LINES non-empty lines of one page."""
+    if not repeated:
+        return text
+    ls = text.splitlines()
+    for _ in range(EDGE_LINES):                      # top
+        while ls and not ls[0].strip():
+            ls.pop(0)
+        if ls and _edge_norm(ls[0]) in repeated:
+            ls.pop(0)
+        else:
+            break
+    for _ in range(EDGE_LINES):                      # bottom
+        while ls and not ls[-1].strip():
+            ls.pop()
+        if ls and _edge_norm(ls[-1]) in repeated:
+            ls.pop()
+        else:
+            break
+    return "\n".join(ls)
+
+
+def _pdf_page_texts(reader, strip=False):
+    """Every page's text; with `strip` (PDF_STRIP_HEADERS), repeated edge
+    lines removed."""
+    texts = [p.extract_text() or "" for p in reader.pages]
+    if not strip:
+        return texts
+    rep_lines = repeated_edge_lines(texts)
+    return [strip_edge_lines(t, rep_lines) for t in texts]
 
 
 def chunk_words(words, size, overlap):
@@ -695,6 +768,7 @@ def sections_from_pdf(col, path, meta):
     from pypdf import PdfReader
     reader = PdfReader(str(path))
     work = col.work_title(col.source_name(path))
+    strip = col.setting("PDF_STRIP_HEADERS", config.PDF_STRIP_HEADERS) == "on"
 
     if meta and "toc_pdf_pages" in meta:  # known book: TOC + printed-page offset
         toc = parse_toc(reader, meta["toc_pdf_pages"])
@@ -704,9 +778,10 @@ def sections_from_pdf(col, path, meta):
             # keyed by TOC entry index, not title: two TOC entries with the
             # same title stay two sections (chunk_source suffixes " (2)")
             sections = {}
+            texts = _pdf_page_texts(reader, strip)
             for i in range(offset + 1, len(reader.pages)):
                 printed = i - offset
-                raw = reader.pages[i].extract_text() or ""
+                raw = texts[i]
                 if raw.strip():
                     j = _section_index([s for _, s in toc], printed)
                     essay = toc[j][0] if j >= 0 else "Front matter"
@@ -726,8 +801,9 @@ def sections_from_pdf(col, path, meta):
             sections = {}
             offset = bounds[0][2]
             starts = [s for _, s, _ in bounds]
+            texts = _pdf_page_texts(reader, strip)
             for i in range(len(reader.pages)):
-                raw = reader.pages[i].extract_text() or ""
+                raw = texts[i]
                 if not raw.strip():
                     continue
                 # keyed by bound index, not title (duplicate titles stay
@@ -747,8 +823,7 @@ def sections_from_pdf(col, path, meta):
     # last resort: one section, pdf page numbers
     def gen_flat():
         pages = []
-        for i, page in enumerate(reader.pages, start=1):
-            raw = page.extract_text() or ""
+        for i, raw in enumerate(_pdf_page_texts(reader, strip), start=1):
             if raw.strip():
                 pages.append((i, re.sub(r"[ \t]+", " ", raw).strip()))
         yield work, pages
@@ -969,7 +1044,11 @@ def chunk_params(col):
     so a settings change re-chunks."""
     return {"chunk_words": col.setting("CHUNK_WORDS", config.CHUNK_WORDS),
             "overlap_words": col.setting("CHUNK_OVERLAP_WORDS",
-                                         config.CHUNK_OVERLAP_WORDS)}
+                                         config.CHUNK_OVERLAP_WORDS),
+            # only when on, so existing collections are not re-chunked
+            **({"pdf_strip_headers": True}
+               if col.setting("PDF_STRIP_HEADERS",
+                              config.PDF_STRIP_HEADERS) == "on" else {})}
 
 
 ID_PREFIX_LEN = 30

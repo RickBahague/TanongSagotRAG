@@ -270,12 +270,18 @@
   .fmsg.good { color:#3a7d44; }
   .conn { font-size:13px; margin-top:6px; white-space:pre-wrap; }
   .conn.good { color:#3a7d44; } .conn.bad { color:#a33; }
+  #dlBanner { display:none; background:#fff7e0; border-bottom:1px solid #ecd9a0;
+              padding:10px 16px; font-size:14px; }
+  .dl { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:6px; }
+  .dl progress { flex:1 1 180px; height:12px; }
+  .dl .dlText { font-size:13px; color:var(--muted); }
   #wBrowse { display:none; font:14px system-ui, sans-serif; padding:8px 12px;
              border:1px solid var(--line); border-radius:6px; background:var(--card);
              cursor:pointer; white-space:nowrap; }
 </style>
 </head>
 <body>
+<div id="dlBanner"></div>
 <header>
   <div class="head-row">
     <h1>Tanong at Sagot</h1>
@@ -1834,8 +1840,9 @@ function renderSettings(data, keep, note) {
   const test = el('button', null, 'Test connection');
   test.type = 'button';
   const conn = el('div', 'conn');
+  const dlSlot = el('div');
   tb.appendChild(test);
-  body.append(tb, conn);
+  body.append(tb, conn, dlSlot);
   const runTest = async quiet => {
     const q = new URLSearchParams();
     for (const [k, p] of [['LLM_BACKEND', 'backend'], ['LLM_URL', 'url'],
@@ -1853,6 +1860,8 @@ function renderSettings(data, keep, note) {
           + (s.backend === 'embedded' ? '' : ' — ' + (s.url || '')));
       if (s.backend === 'embedded') {
         lines.push((s.file_exists ? '✓' : '✗') + ' model file ' + (s.model_path || ''));
+        dlSlot.textContent = '';
+        if (s.downloadable) dlSlot.appendChild(modelDownloadWidget(() => runTest(true)));
         lines.push((s.llama_cpp ? '✓' : '✗') + ' llama-cpp-python installed');
       } else {
         lines.push(s.model_present === true ? '✓ model “' + s.model + '” present'
@@ -1892,6 +1901,35 @@ function renderSettings(data, keep, note) {
   }
   body.appendChild(adv);
 
+  // app log (errors and warnings; the desktop app has no console)
+  const logBox = document.createElement('details');
+  logBox.appendChild(el('summary', null, 'Log'));
+  const logBtns = el('div', 'fbtns');
+  const openLog = el('button', null, 'Open log folder');
+  openLog.type = 'button';
+  const showLog = el('button', null, 'Show recent log');
+  showLog.type = 'button';
+  const logPath = el('div', 'hint');
+  const logText = el('pre', 'conn');
+  logText.style.display = 'none';
+  logText.style.maxHeight = '260px';
+  logText.style.overflow = 'auto';
+  logBtns.append(openLog, showLog);
+  logBox.append(logBtns, logPath, logText);
+  openLog.onclick = async () => {
+    const r = await jreq('POST', '/logs/open', {});
+    logPath.textContent = r.ok ? 'Opened ' + r.data.folder : 'Could not open: ' + (r.data.error || r.status);
+  };
+  showLog.onclick = async () => {
+    const r = await jreq('GET', '/logs');
+    if (!r.ok) { logPath.textContent = 'Could not read the log: ' + (r.data.error || r.status); return; }
+    logPath.textContent = r.data.path;
+    logText.textContent = r.data.tail || '(the log is empty)';
+    logText.style.display = '';
+    logText.scrollTop = logText.scrollHeight;
+  };
+  body.appendChild(logBox);
+
   const btns = el('div', 'fbtns');
   const save = el('button', 'primary', 'Save');
   save.type = 'button';
@@ -1905,7 +1943,8 @@ function renderSettings(data, keep, note) {
   btns.append(save, msg);
   body.appendChild(btns);
   SET_FIELDS.msg = msg;
-  if (spec.LLM_BACKEND && spec.LLM_BACKEND.value !== 'embedded') runTest(true);
+  // embedded too: shows the model download when the model is missing
+  if (spec.LLM_BACKEND) runTest(true);
 }
 
 // POST /settings; resetKey = the field whose override is being removed
@@ -2275,8 +2314,61 @@ function setAsking(on) {
   $('stopBtn').style.display = on ? '' : 'none';
 }
 
+// ---- first-run model download (embedded backend, model not in the bundle)
+const DL_SIZE = '1.1 GB';
+function fmtMB(n) { return (n / 1048576).toFixed(0) + ' MB'; }
+function modelDownloadWidget(onDone) {
+  const box = el('div', 'dl');
+  const btn = el('button', 'primary', 'Download model (' + DL_SIZE + ')');
+  btn.type = 'button';
+  const cancel = el('button', null, 'Cancel');
+  cancel.type = 'button'; cancel.style.display = 'none';
+  const bar = document.createElement('progress');
+  bar.max = 1; bar.value = 0; bar.style.display = 'none';
+  const txt = el('span', 'dlText');
+  box.append(btn, bar, cancel, txt);
+  let timer = null;
+  const show = s => {
+    const busy = ['starting', 'downloading', 'verifying'].includes(s.state);
+    btn.style.display = busy || s.state === 'done' ? 'none' : '';
+    cancel.style.display = busy ? '' : 'none';
+    bar.style.display = busy || (s.done && s.state !== 'done') ? '' : 'none';
+    if (s.total) { bar.max = s.total; bar.value = s.done || 0; }
+    if (s.state === 'downloading')
+      txt.textContent = fmtMB(s.done) + ' of ' + fmtMB(s.total)
+        + (s.rate > 0 ? ' — ' + (s.rate / 1048576).toFixed(1) + ' MB/s' : '');
+    else if (s.state === 'verifying') txt.textContent = 'Checking the file…';
+    else if (s.state === 'done') txt.textContent = '✓ Model ready.';
+    else if (s.state === 'error') { txt.textContent = '✗ ' + s.error; btn.textContent = 'Try again (resumes)'; }
+    else if (s.state === 'cancelled' || (s.state === 'idle' && s.done)) {
+      txt.textContent = 'Paused at ' + fmtMB(s.done) + '.'; btn.textContent = 'Resume download'; }
+    else txt.textContent = 'Needed once for answers; nothing else is sent anywhere.';
+    if (busy && !timer) timer = setInterval(poll, 1000);
+    if (!busy && timer) { clearInterval(timer); timer = null; }
+    if (s.state === 'done' && onDone) onDone();
+  };
+  const poll = async () => { const r = await jreq('GET', '/model/download'); if (r.ok) show(r.data); };
+  btn.onclick = async () => { const r = await jreq('POST', '/model/download', {}); if (r.ok) show(r.data); };
+  cancel.onclick = async () => { const r = await jreq('POST', '/model/download/cancel', {}); if (r.ok) show(r.data); };
+  poll();
+  return box;
+}
+async function checkModelDownload() {
+  try {
+    const r = await jreq('GET', '/backend/status');
+    if (!r.ok || !r.data.downloadable) return;
+    const b = $('dlBanner');
+    b.textContent = '';
+    b.appendChild(el('div', null, 'The answer model is not on this computer yet. '
+      + 'Search works now; answers need a one-time download.'));
+    b.appendChild(modelDownloadWidget(() => setTimeout(() => { b.style.display = 'none'; }, 2500)));
+    b.style.display = 'block';
+  } catch (e) { /* status unavailable: nothing to offer */ }
+}
+
 enableBrowse();               // pywebview may already be ready
 loadCollections();
+checkModelDownload();
 </script>
 </body>
 </html>

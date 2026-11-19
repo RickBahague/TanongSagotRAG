@@ -278,3 +278,55 @@ def tag_mismatch(npz, tag=None):
         if have != str(tag[key]):
             return f"{key} is {have} but the encoder uses {tag[key]}"
     return None
+
+
+class OnnxReranker:
+    """Cross-encoder (config.RERANK_MODEL, ms-marco-MiniLM-L-6-v2 by
+    default) via onnxruntime + tokenizers: scores (query, passage) pairs.
+    Same .predict(pairs) interface as sentence-transformers' CrossEncoder;
+    returns the raw logit per pair (higher = more relevant)."""
+
+    def __init__(self, model_dir, max_len=None):
+        import numpy as np
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+        self.np = np
+        model_dir = Path(model_dir)
+        self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+        self.tok.no_padding()
+        self.tok.enable_truncation(max_length=max_len or config.RERANK_MAX_LEN,
+                                   strategy="only_second")
+        self.sess = ort.InferenceSession(str(model_dir / "model.onnx"),
+                                         providers=["CPUExecutionProvider"])
+        self._inputs = {i.name for i in self.sess.get_inputs()}
+
+    def predict(self, pairs, batch_size=16):
+        np = self.np
+        pairs = list(pairs)
+        out = []
+        for a, b in _batches(len(pairs), batch_size):
+            encs = self.tok.encode_batch([tuple(p) for p in pairs[a:b]])
+            maxlen = max(len(x.ids) for x in encs)
+            ids = np.zeros((len(encs), maxlen), dtype="int64")
+            mask = np.zeros_like(ids)
+            types = np.zeros_like(ids)
+            for i, x in enumerate(encs):
+                ids[i, :len(x.ids)] = x.ids
+                mask[i, :len(x.ids)] = x.attention_mask
+                types[i, :len(x.ids)] = x.type_ids
+            feeds = {"input_ids": ids, "attention_mask": mask}
+            if "token_type_ids" in self._inputs:
+                feeds["token_type_ids"] = types
+            logits = self.sess.run(None, feeds)[0]
+            out.extend(float(v) for v in logits.reshape(len(encs), -1)[:, 0])
+        return out
+
+
+def get_reranker():
+    """OnnxReranker when config.ONNX_RERANKER_DIR holds the model, else
+    sentence-transformers' CrossEncoder; ImportError when neither."""
+    d = Path(config.ONNX_RERANKER_DIR)
+    if (d / "model.onnx").exists() and (d / "tokenizer.json").exists():
+        return OnnxReranker(d)
+    from sentence_transformers import CrossEncoder
+    return CrossEncoder(config.RERANK_MODEL)

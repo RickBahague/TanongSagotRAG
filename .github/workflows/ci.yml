@@ -1,0 +1,98 @@
+# AnyRAG CI (P4): tests on every push/PR; desktop build + headless smoke
+# test on macOS, Windows and Linux. The 1.1 GB GGUF is never fetched here:
+# builds download it on first use (modeldl.py).
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        # core + dev, plus the light dense-retrieval deps the tests expect
+        # (several tests assume the ONNX encoder; see plan.md "CI")
+        run: |
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install numpy onnxruntime tokenizers
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: models/encoder-onnx
+          key: encoder-onnx-bge-small-en-v1.5
+      - name: Fetch ONNX encoder
+        run: python scripts/export_onnx.py
+      - name: Tests
+        run: python -m pytest -q
+
+  build:
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Linux GUI libraries for pywebview
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgirepository1.0-dev libcairo2-dev \
+            gir1.2-webkit2-4.1 python3-gi
+      - name: Install
+        # llama-cpp-python compiles from source where no wheel exists
+        # (Linux/Windows); that step dominates the build time.
+        run: python -m pip install -r requirements.txt -r requirements-app.txt
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: |
+            models/encoder-onnx
+            models/reranker-onnx
+          key: models-bge-small-minilm-reranker
+      - name: Fetch encoder and reranker
+        run: |
+          python scripts/export_onnx.py
+          python scripts/fetch_reranker.py
+      - name: App icon (macOS)
+        if: runner.os == 'macOS'
+        run: python scripts/make_icon.py
+      - name: PyInstaller
+        run: pyinstaller --noconfirm anyrag.spec
+      - name: Smoke test the bundle
+        shell: bash
+        run: |
+          python tests/fixtures/build.py "$RUNNER_TEMP/docs"
+          case "$RUNNER_OS" in
+            macOS)   EXE=dist/AnyRAG.app/Contents/MacOS/AnyRAG ;;
+            Windows) EXE=dist/AnyRAG/AnyRAG.exe ;;
+            *)       EXE=dist/AnyRAG/AnyRAG ;;
+          esac
+          "$EXE" --smoke "$RUNNER_TEMP/docs" | tee smoke.log
+          grep -q "SMOKE OK" smoke.log
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyRAG-${{ runner.os }}
+          path: dist/
+          retention-days: 7
