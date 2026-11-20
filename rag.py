@@ -1213,6 +1213,257 @@ def check_citations(answer, n):
             "out_of_range": sorted(x for x in nums if not 1 <= x <= n)}
 
 
+
+# ------------------------------------------------------------ answer prose --
+# The small embedded model answers in one block that walks the excerpts
+# ("Excerpt [2] elaborates on how …"), puts markers after the full stop and
+# sometimes repeats itself. Asking for paragraphs in the prompt cost
+# citations and made it loop (plan.md, "Answer prose"), so the shape is
+# fixed here, after generation, without touching the words of a claim:
+#   - narration about the excerpts is removed and its number becomes the
+#     sentence's [n] marker ("Excerpt [4] mentions that X." -> "X [4].")
+#   - markers sit at the end of their sentence, before the full stop
+#   - exact repeated sentences are dropped
+#   - prose is regrouped into paragraphs: the model's own breaks are kept
+#     where a paragraph has at least 2 sentences; a new paragraph starts
+#     when the topic changes (few content words shared with the last two
+#     sentences; a looser bar when the cited excerpts change too), or
+#     after PARA_MAX_SENTENCES.
+# Markdown lists, headings, quotes, tables and code are left as written.
+PARA_MAX_SENTENCES = 5
+# lifted sentences (plan.md "Answer prose": the model copies sentences
+# nearly word for word but numbers them [1], [2], [3] in turn): a sentence
+# whose content words are >= LIFT_COVER inside one excerpt is cited to it
+# when it has no marker, or when its marker's excerpt covers < WRONG_COVER
+# of it and the lifted-from one covers LIFT_MARGIN more
+LIFT_COVER = 0.8
+LIFT_MIN_WORDS = 4
+WRONG_COVER = 0.5
+LIFT_MARGIN = 0.3
+PARA_MIN_OVERLAP = 0.15     # topic change: share of a sentence's words
+PARA_SHIFT_OVERLAP = 0.4    # ... lower bar when the cited excerpts change
+_ABBREV = frozenset("""mr mrs ms dr st jr sr vs etc e.g i.e no nos p pp vol
+fig u.s u.k u.n gen sen rep gov prof sec art ch ed eds approx""".split())
+_PROSE_VERB = (r"(?:mention|discuss|elaborate|outline|state|describe|note|"
+               r"explain|say|add|highlight|emphasi[sz]e|argue|show|indicate|"
+               r"suggest|point|reveal|detail|claim|present|stress|observe|"
+               r"list|define|provide|focus|reiterate|underline|underscore|"
+               r"warn|talk|touch|go|offer|give|address|cover)\w*")
+_EXC = (r"(?:(?:the|this|these|that|those|both|all|each|an?)\s+)?"
+        r"(?:provided\s+|given\s+)?excerpts?\b\s*"
+        r"(\[?\d+\]?(?:\s*(?:,|and|&)\s*\[?\d+\]?)*)?")
+_EXC_LEAD = re.compile(
+    r"^(?:(?:also|further(?:more)?|additionally|moreover),?\s+)?"
+    r"(?:according\s+to|as\s+(?:\w+\s+)?(?:in|by)|in|from|based\s+on)\s+"
+    + _EXC + r"\s*,?\s*", re.I)
+_EXC_THAT = re.compile(
+    r"^(?:(?:also|further(?:more)?|additionally|moreover),?\s+)?" + _EXC
+    + r"\s+(?:also\s+|further\s+)?" + _PROSE_VERB
+    + r"(?:\s+(?:on|out|to|into|over))?\s+(?:that|how)\s+", re.I)
+_EXC_SUBJ = re.compile(
+    r"^(?:(?:also|further(?:more)?|additionally|moreover),?\s+)?" + _EXC
+    + r"\s+(?:also\s+|further\s+)?(" + _PROSE_VERB + r")", re.I)
+_EXC_ASIDE = re.compile(
+    r"(,)?\s*\(?\s*(?:as\s+\w+ed\s+(?:in|by)|according\s+to|see|"
+    r"per)\s+" + _EXC + r"\s*\)?(\s*,)?(?=[\s.;:!?]|$)", re.I)
+_EXC_PAREN = re.compile(r"\s*\(\s*" + _EXC + r"\s*\)", re.I)
+_EXC_BARE = re.compile(r"\s+(?:in|by|from|across|throughout)\s+" + _EXC
+                       + r"(?=[\s,.;:!?]|$)", re.I)
+_MARK = r"\[\d+(?:\s*[-–,]\s*\d+)*\]"
+_MD_LINE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|#|>|\||```|~~~)")
+
+
+def _nums(text):
+    return [int(x) for x in re.findall(r"\d+", text or "")]
+
+
+def _split_sentences(par):
+    """Split prose into sentences; markers right after the full stop stay
+    with the sentence they follow ("X. [1] Y." -> "X. [1]", "Y.")."""
+    out, start = [], 0
+    rx = re.compile(r"[.!?][\"”’)]?((?:\s*" + _MARK + r"\.?)*)\s+"
+                    r"(?=[\"“(]?[A-Z0-9\[])")
+    for m in rx.finditer(par):
+        before = re.findall(r"[\w.]+$", par[start:m.start()])
+        w = before[0].lower() if before else ""
+        if w in _ABBREV or (len(w) == 1 and w.isalpha()):
+            continue
+        out.append(par[start:m.end()].strip())
+        start = m.end()
+    if par[start:].strip():
+        out.append(par[start:].strip())
+    return out
+
+
+def _unnarrate(sent):
+    """Drop talk about the excerpts; return (sentence, cited numbers)."""
+    cites = []
+
+    def take(m):
+        cites.extend(_nums(m.group(1)))
+
+    m = _EXC_LEAD.match(sent) or _EXC_THAT.match(sent)
+    if m:
+        take(m)
+        rest = sent[m.end():]
+        sent = rest[:1].upper() + rest[1:]
+    else:
+        m = _EXC_SUBJ.match(sent)
+        if m:
+            take(m)
+            plural = len(_nums(m.group(1))) > 1
+            sent = ("The sources " if plural else "The source ") \
+                + m.group(2).lower() + sent[m.end():]
+
+    def aside(m):
+        cites.extend(_nums(m.group(2)))
+        return "" if (m.group(1) or not m.group(3)) else ","
+    sent = _EXC_ASIDE.sub(aside, sent)
+    sent = _EXC_PAREN.sub(lambda m: take(m) or "", sent)
+    sent = _EXC_BARE.sub(lambda m: take(m) or "", sent)
+    sent = re.sub(r"\s+,", ",", re.sub(r",\s*,", ",", sent))
+    return sent, cites
+
+
+def _tidy_sentence(sent, extra=()):
+    """Markers at the end of the sentence, before its final punctuation,
+    without repeats: "X. [2]. [1]" -> "X [2][1]."."""
+    lead = re.match(r"^((?:" + _MARK + r"[.,]?\s*)+)", sent)
+    marks = re.findall(_MARK, lead.group(1)) if lead else []
+    if lead:
+        sent = sent[lead.end():]
+    m = re.search(r"([.!?][\"”’)]?)?((?:\s*" + _MARK + r"\.?)+)\s*$", sent)
+    punct = None
+    if m and m.group(2):
+        marks = re.findall(_MARK, m.group(2)) + marks
+        punct = m.group(1) or ("." if m.group(2).endswith(".") else None)
+        sent = sent[:m.start()]
+    sent = sent.rstrip()
+    if punct is None:
+        p = re.search(r"[.!?][\"”’)]?$", sent)
+        punct = p.group(0) if p else ""
+        if p:
+            sent = sent[:p.start()].rstrip()
+    have = set(citation_markers(sent))
+    marks += [f"[{n}]" for n in extra if n not in have]
+    seen, keep = set(have), []
+    for mk in marks:
+        nums = tuple(citation_markers(mk))
+        if nums and not set(nums) <= seen:
+            keep.append(mk)
+            seen.update(nums)
+    if not keep:
+        return sent + (punct or "")
+    return sent + ("" if sent.endswith("]") else " ") + "".join(keep) \
+        + (punct or "")
+
+
+def _lifted_cite(sent, words, excerpts):
+    """Re-cite a sentence copied from one excerpt (see LIFT_COVER)."""
+    if not excerpts or len(words) < LIFT_MIN_WORDS:
+        return sent
+    cover = [len(words & e) / len(words) for e in excerpts]
+    best = max(range(len(cover)), key=cover.__getitem__)
+    if cover[best] < LIFT_COVER:
+        return sent
+    if re.search(r"\[(?![\d…]|\.\.\.)[^\]]+\]", sent):
+        return sent                      # "[Section, p. 4]": cited by title
+    cited = [n for n in citation_markers(sent) if 1 <= n <= len(cover)]
+    if not citation_markers(sent):
+        return _tidy_sentence(sent, [best + 1])
+    if best + 1 in cited:
+        return sent
+    if cited and max(cover[n - 1] for n in cited) < WRONG_COVER \
+            and cover[best] - max(cover[n - 1] for n in cited) >= LIFT_MARGIN:
+        return _tidy_sentence(re.sub(r"\s*" + _MARK, "", sent), [best + 1])
+    return sent
+
+
+def compose_answer(text, excerpts=None):
+    """Scholar/persona answer -> coherent paragraphs with bare [n]
+    citations (see the comment above). `excerpts`: the numbered excerpt
+    texts in prompt order, to cite lifted sentences. Idempotent; never
+    adds or rewords a claim."""
+    excerpts = [set(tokenize(t)) for t in excerpts or []]
+    if not text or "```" in text or "~~~" in text:
+        return text
+    blocks = [b for b in re.split(r"\n\s*\n", text.strip()) if b.strip()]
+    out, run = [], []          # run: sentences of consecutive prose blocks
+
+    def flush():
+        if run:
+            out.extend(_group(run))
+            run.clear()
+    seen, prev_kept = set(), 0
+    for b in blocks:
+        if any(_MD_LINE.match(l) for l in b.splitlines()):
+            flush()
+            out.append(b.strip())
+            prev_kept = 0
+            continue
+        # honor the model's paragraph break only after a real paragraph
+        # (one sentence per line is not paragraphing)
+        first, kept, pending = prev_kept >= 2, 0, []
+        for i, raw in enumerate(_split_sentences(" ".join(b.split()))):
+            sent, cites = _unnarrate(raw)
+            sent = _tidy_sentence(sent.strip(), cites + pending)
+            body = re.sub(_MARK, "", sent).strip(" .!?")
+            if not body and i == 0:             # "[2]. The US …" -> next
+                pending = citation_markers(sent)
+                continue
+            pending = []
+            if not body:
+                if run:                         # stray "[2]." -> previous
+                    text = _tidy_sentence(run[-1]["text"],
+                                          citation_markers(sent))
+                    run[-1] = dict(run[-1], text=text,
+                                   cites=set(citation_markers(text)))
+                continue
+            key = " ".join(body.lower().split())
+            if key in seen:
+                continue
+            seen.add(key)
+            words = set(tokenize(body))
+            sent = _lifted_cite(sent, words, excerpts)
+            run.append({"text": sent, "cites": set(citation_markers(sent)),
+                        "words": words, "brk": first})
+            first = False
+            kept += 1
+        prev_kept = kept
+    flush()
+    return "\n\n".join(out)
+
+
+# a sentence that opens like this continues the previous one's thought
+_CONTINUES = re.compile(r"^(?:it|its|they|their|them|this|these|those|that|"
+                        r"he|she|his|her|such|however|but|instead|therefore|"
+                        r"thus|hence|also|yet|still|so|then|meanwhile|"
+                        r"nevertheless|moreover|furthermore|in turn)\b", re.I)
+
+
+def _group(sents):
+    paras, cur = [], []
+    for s in sents:
+        if cur and not (_CONTINUES.match(s["text"])
+                        and len(cur) < PARA_MAX_SENTENCES):
+            n = len(cur)
+            cited = set().union(*(c["cites"] for c in cur))
+            recent = set().union(*(c["words"] for c in cur[-2:]))
+            shared = (len(s["words"] & recent) / len(s["words"])
+                      if s["words"] else 1.0)
+            if (n >= PARA_MAX_SENTENCES
+                    or (n >= 2 and s["brk"])
+                    or (n >= 2 and s["cites"] and cited
+                        and not s["cites"] & cited
+                        and shared < PARA_SHIFT_OVERLAP)
+                    or (n >= 3 and shared < PARA_MIN_OVERLAP)):
+                paras.append(cur)
+                cur = []
+        cur.append(s)
+    if cur:
+        paras.append(cur)
+    return [" ".join(c["text"] for c in p) for p in paras]
+
 # ------------------------------------------------------------- follow-ups --
 # P2-1. A follow-up ("what about after 2020?", "why did they do that?")
 # retrieves nothing useful on its own, so it is rewritten into a standalone
@@ -1851,7 +2102,9 @@ def ask_stream(col, question, mode="scholar", index=None, k=None,
                for s, c in hits]
     return {"sources": sources, "mode": mode, "stream": gen, "answer": None,
             "dropped": dropped, "rewritten_question": rewritten,
-            "history_used": used}
+            "history_used": used,
+            # excerpt texts in prompt order, for compose_answer (not sent)
+            "excerpts": [c["text"] for _, c in hits]}
 
 
 def ask(col, question, mode="scholar", index=None, k=None, history=None):
@@ -1862,6 +2115,7 @@ def ask(col, question, mode="scholar", index=None, k=None, history=None):
     if res["stream"] is not None:
         res["answer"] = "".join(res["stream"])
         if res["mode"] != "quotes":
+            res["answer"] = compose_answer(res["answer"], res.get("excerpts"))
             res["citations"] = check_citations(res["answer"],
                                                len(res["sources"]))
         if res["mode"] == "persona":

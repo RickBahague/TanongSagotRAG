@@ -2238,6 +2238,10 @@ async function send(e) {
       if (!body) startBody();             // defensive: meta not seen yet
       full += ev.text;
       if (!timer) timer = setTimeout(paint, 120);
+    } else if (ev.type === 'final') {
+      // the server's composed text (paragraphs, [n] markers) replaces the
+      // streamed one; renderAnswer paints it when the stream ends
+      full = ev.text;
     } else if (ev.type === 'verify') {
       verify = ev.quotes;
     } else if (ev.type === 'citations') {

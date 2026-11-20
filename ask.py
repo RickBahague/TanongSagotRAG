@@ -64,7 +64,11 @@ def print_result(res, mode, rt):
             print(f"  {num}{where}, {pages}"
                   + ("  (not cited)" if unused else ""))
     print()
-    return "".join(full), verify, citations
+    answer = "".join(full)
+    if numbered and res["stream"] is not None:
+        # the saved transcript form (the stream above stays as generated)
+        answer = rag.compose_answer(answer, res.get("excerpts"))
+    return answer, verify, citations
 
 
 def main():

@@ -907,3 +907,73 @@ bge ranks better. e5 is the setting for collections in other languages or
 mixed languages (`EMBED_MODEL`, then re-ingest). Its ONNX folder is not in
 the desktop bundle; in the packaged app, switching needs the folder in
 `models/` (a first-run download like `modeldl.py` would be the follow-up).
+
+## Answer prose — 2026-11-20 (reported in the desktop click-through; fixed)
+
+Reported by the user: scholar answers read "Excerpt [1] says … Excerpt [2]
+elaborates …", a summary per excerpt, and always come back as one
+paragraph. Seen in the saved JMS conversation 20261120-052155: 2 of 9
+covered answers name "Excerpt [n]" in the prose, one walks excerpts 1–6 in
+turn, and 9 of 9 are a single paragraph. Likely cause: `CITE_REMINDER`
+(the last thing the model reads) asks for "a few sentences" and its
+example is `"<a fact from excerpt 2> [2]"`. Nothing asks for paragraphs.
+Wanted: coherent paragraphs, one idea each, with only the bracket marker
+where a claim comes from.
+
+Prompt attempts (10 JMS questions, embedded Qwen2.5-1.5B, user's real
+collection). Sentences are counted with the marker after the full stop
+attached to them.
+
+| Prompt | Multi-paragraph | Answers with no citation | Notes |
+|---|---|---|---|
+| current (baseline) | 0/10 | 4/10 | 26 of 111 sentences uncited |
+| + paragraph and "no Excerpt" rules, longer reminder | 0/10 | 9/10 | rules cost citations |
+| B: layout example in the reminder | 4/10 | 0/10 | loops ("[2]. [1]. [2]. …"), 405 sentences |
+| C: same, reminder only | 1/10 | 4/10 | |
+| D: one "new paragraph" sentence added | 0/10 | 7/10 | 2/10 name "excerpt" |
+
+The 1.5B model can't hold layout rules: every addition cost citations
+or made it loop. So the prompt is unchanged and the shape is fixed after
+generation instead: `rag.compose_answer(text, excerpts)`, applied to
+scholar and persona answers (never quotes) in `serve.py` (a `final`
+NDJSON event replaces the streamed text; the saved turn holds the
+composed form), in `rag.ask` and in `ask.py` transcripts. It never adds
+or rewords a claim. What it does:
+
+- **Narration → marker:** "Excerpt [4] mentions that X." → "X [4]."; "…,
+  as discussed in Excerpt [1], …" and "According to excerpt 3, …" are
+  dropped and become the sentence's marker. "Excerpt [3] discusses Y" →
+  "The source discusses Y [3]." "in the excerpts" with no number is
+  dropped.
+- **Markers** go at the end of their sentence, before the full stop, with
+  no repeats ("X. [2]. [1]" → "X [2][1].").
+- **Repeats:** exact repeated sentences are dropped (the looping answers).
+- **Paragraphs:** the model's breaks are kept after a paragraph of 2+
+  sentences. One sentence per line is merged. A new paragraph starts at a
+  topic change: under 15% of a sentence's content words are shared with
+  the previous two sentences, or under 40% when the cited excerpts also
+  change. At most 5 sentences per paragraph. No break before a sentence
+  that opens with "It/They/This/However/…". Lists, headings, quotes,
+  tables and code are left as written.
+- **Lifted sentences:** calibration showed the model's own numbers are
+  mostly wrong. It numbers sentences [1], [2], [3] in turn while copying
+  them from one excerpt: on 28 answers, only 13 of 151 sentences had a
+  marker whose excerpt contained at least half the sentence's content
+  words. A sentence counts as lifted when at least 80% (`LIFT_COVER`) of
+  its content words are in one excerpt (4 or more words). If it has no
+  marker, it is cited to that excerpt. If its marker's excerpt covers
+  under 50% and the lifted-from one covers 0.3 more, the marker is
+  replaced. A title citation "[Section, p. N]" is left alone. Paraphrases
+  keep the model's choice.
+
+| 28 JMS answers | Cited, and the excerpt supports it | Uncited sentences | Answers with no citation |
+|---|---|---|---|
+| model output | 9% (13/151) | 62% | 11/28 |
+| + compose_answer, no excerpts | 17% (19/114) | 69% | 11/28 |
+| **+ lifted-sentence citations** | **77% (88/114)** | **18%** | **1/28** |
+
+End to end on the 10 questions, before → after: 0 → 5 answers in more than
+one paragraph (the other 5 are 1–3 sentences), 6 → 0 with markers after
+the full stop, 2/9 → 0 naming "Excerpt" (the user's saved session).
+Tests: `tests/test_p7_answer_prose.py`.
+

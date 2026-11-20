@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-11-20
+
+### Bug fix — Answers in coherent paragraphs with bare [n] citations
+Reported from the desktop click-through: answers walked the excerpts
+("Excerpt [2] elaborates on how …"), summarized them one by one, and always
+came back as one paragraph. The user asked for coherent paragraphs with
+just a citation where the text was lifted.
+- `rag.py`: new `compose_answer(text, excerpts)`, run after generation on
+  scholar and persona answers.
+  - Narration about the excerpts becomes the sentence's [n] marker.
+  - Markers move before the full stop.
+  - Repeated sentences are dropped.
+  - Prose is regrouped into paragraphs at topic changes.
+  - A sentence copied from an excerpt is cited to that excerpt when it has
+    no marker or its marker points to an excerpt that doesn't contain it.
+    The model numbers sentences in turn: supported citations went from
+    9% to 77%, and answers with no citation from 11/28 to 1/28.
+  - `ask_stream` returns the excerpt texts for this.
+- Prompt unchanged: five prompt variants were measured. Each one cost
+  citations or made the 1.5B model loop (numbers in `plan.md`, "Answer
+  prose").
+- `serve.py` sends the composed text as a `final` event and saves it.
+  `static/index.html` shows it. `ask.py` saves it in transcripts.
+- Tests: `tests/test_p7_answer_prose.py` (new).
+  `tests/test_m3a_answer_quality.py` allows the `final` event.
+
 ## 2026-11-19
 
 ### Feature — Reranker veto on the relevance gate; multilingual encoder option

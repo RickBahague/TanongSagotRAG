@@ -151,7 +151,10 @@ def test_citations_event(server, fake_llm, make_collection):
     evs = _ask(server, col, BEES_Q)
     types = [e["type"] for e in evs]
     assert types[0] == "meta" and types[-2:] == ["citations", "done"]
-    assert set(types[1:-2]) == {"delta"}
+    # "final": the composed answer (plan.md "Answer prose"), once, last
+    assert set(types[1:-3]) == {"delta"} and types[-3] == "final"
+    assert evs[-3]["text"] == ("Wax comes from glands [1]. Cells are "
+                               "hexagonal [2][3][99].")
     meta = evs[0]
     assert meta["rewritten_question"] is None
     n = len(meta["sources"])

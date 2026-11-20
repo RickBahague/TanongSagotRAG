@@ -1151,6 +1151,13 @@ class Handler(BaseHTTPRequestHandler):
                     parts.append(t)
                     w({"type": "delta", "text": t})
                 answer = "".join(parts)
+                if res["mode"] != "quotes":
+                    # paragraphs + bare [n] markers (plan.md "Answer prose");
+                    # the UI swaps the streamed text for this one
+                    composed = rag.compose_answer(answer, res.get("excerpts"))
+                    if composed != answer:
+                        answer = composed
+                        w({"type": "final", "text": answer})
                 # quotes mode: mechanical fidelity check after generation
                 if res["mode"] == "quotes" and res["sources"]:
                     chunks = [rt.by_id[s["id"]] for s in res["sources"]
